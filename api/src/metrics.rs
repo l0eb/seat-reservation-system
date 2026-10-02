@@ -15,11 +15,14 @@ pub const DECLINE_REASONS: [&str; 4] = [
     "idempotency_mismatch",
 ];
 
+pub const CACHE_RESULTS: [&str; 4] = ["hit", "miss", "error", "bypassed"];
+
 /// In-process counters. Exact only because the service runs as a single
 /// instance; seat gauges are read from the database at scrape time instead.
 pub struct Metrics {
     reservations_confirmed: AtomicU64,
     reservations_declined: [AtomicU64; DECLINE_REASONS.len()],
+    cache_lookups: [AtomicU64; CACHE_RESULTS.len()],
     /// Indexed by HTTP status code.
     http_requests: Vec<AtomicU64>,
 }
@@ -29,6 +32,7 @@ impl Metrics {
         Self {
             reservations_confirmed: AtomicU64::new(0),
             reservations_declined: Default::default(),
+            cache_lookups: Default::default(),
             http_requests: (0..600).map(|_| AtomicU64::new(0)).collect(),
         }
     }
@@ -40,6 +44,12 @@ impl Metrics {
     pub fn record_declined(&self, reason: &str) {
         if let Some(i) = DECLINE_REASONS.iter().position(|r| *r == reason) {
             self.reservations_declined[i].fetch_add(1, Relaxed);
+        }
+    }
+
+    pub fn record_cache(&self, result: &str) {
+        if let Some(i) = CACHE_RESULTS.iter().position(|r| *r == result) {
+            self.cache_lookups[i].fetch_add(1, Relaxed);
         }
     }
 
@@ -60,6 +70,13 @@ impl Metrics {
         for (reason, counter) in DECLINE_REASONS.iter().zip(&self.reservations_declined) {
             let n = counter.load(Relaxed);
             let _ = writeln!(out, "reservations_declined_total{{reason=\"{reason}\"}} {n}");
+        }
+
+        out.push_str("# HELP cache_lookups_total Cache reads, by result.\n");
+        out.push_str("# TYPE cache_lookups_total counter\n");
+        for (result, counter) in CACHE_RESULTS.iter().zip(&self.cache_lookups) {
+            let n = counter.load(Relaxed);
+            let _ = writeln!(out, "cache_lookups_total{{result=\"{result}\"}} {n}");
         }
 
         out.push_str("# HELP http_requests_total HTTP responses, by status code.\n");

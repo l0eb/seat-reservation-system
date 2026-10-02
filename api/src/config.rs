@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 #[derive(Debug, Clone)]
 pub struct Config {
     pub database_url: String,
+    pub cache_url: Option<String>,
     pub jwt_secret: String,
     pub port: u16,
     pub db_pool_max_connections: u32,
@@ -17,6 +18,7 @@ impl Config {
     pub fn from_env() -> Result<Self> {
         Ok(Self {
             database_url: env::var("DATABASE_URL").context("DATABASE_URL must be set")?,
+            cache_url: env::var("CACHE_URL").ok().filter(|v| !v.trim().is_empty()),
             jwt_secret: env::var("JWT_SECRET").context("JWT_SECRET must be set")?,
             port: parse_env("PORT", 8080)?,
             db_pool_max_connections: parse_env("DB_POOL_MAX_CONNECTIONS", 30)?,

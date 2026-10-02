@@ -3,7 +3,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use uuid::Uuid;
 
-use super::shows::lock_seats;
+use super::shows::{lock_seats, show_detail_key};
 use crate::auth::AuthUser;
 use crate::error::AppError;
 use crate::models::{Reservation, RESERVATION_COLUMNS};
@@ -69,5 +69,6 @@ async fn cancel(
     .await?;
 
     tx.commit().await?;
+    state.cache.delete(&show_detail_key(reservation.show_id)).await;
     Ok(Json(reservation))
 }

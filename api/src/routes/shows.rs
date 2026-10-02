@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
@@ -15,6 +17,12 @@ use crate::state::AppState;
 const MAX_ROWS: u32 = 26;
 const MAX_SEATS_PER_ROW: u32 = 500;
 const MAX_IDEMPOTENCY_KEY_LEN: usize = 255;
+/// Shows can't be edited after creation, so this only bounds memory use.
+const SHOW_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
+/// Writes delete the entry on commit; the TTL bounds the one race that
+/// remains (a read that started before the commit re-filling it afterwards).
+const SHOW_DETAIL_CACHE_TTL: Duration = Duration::from_secs(2);
+const _: () = assert!(SHOW_DETAIL_CACHE_TTL.as_secs() < crate::cache::BREAKER_COOLDOWN.as_secs());
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -89,20 +97,20 @@ async fn create_show(
     Ok((StatusCode::CREATED, Json(show)))
 }
 
-#[derive(Serialize, sqlx::FromRow)]
+#[derive(Serialize, Deserialize, sqlx::FromRow)]
 struct SeatView {
     label: String,
     status: String,
 }
 
-#[derive(Serialize, Default)]
+#[derive(Serialize, Deserialize, Default)]
 struct SeatCounts {
     available: i64,
     held: i64,
     confirmed: i64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct ShowDetail {
     #[serde(flatten)]
     show: Show,
@@ -110,11 +118,39 @@ struct ShowDetail {
     seats: Vec<SeatView>,
 }
 
+fn show_key(show_id: Uuid) -> String {
+    format!("show:{show_id}")
+}
+
+pub(super) fn show_detail_key(show_id: Uuid) -> String {
+    format!("show:{show_id}:detail")
+}
+
+async fn load_show(state: &AppState, show_id: Uuid) -> Result<Show, AppError> {
+    let key = show_key(show_id);
+    if let Some(show) = state.cache.get_json(&key).await {
+        return Ok(show);
+    }
+    let show = fetch_show(&state.pool, show_id).await?;
+    state.cache.set_json(&key, &show, SHOW_CACHE_TTL).await;
+    Ok(show)
+}
+
 async fn get_show(
     State(state): State<AppState>,
     Path(show_id): Path<Uuid>,
 ) -> Result<Json<ShowDetail>, AppError> {
-    let show = fetch_show(&state.pool, show_id).await?;
+    let key = show_detail_key(show_id);
+    if let Some(detail) = state.cache.get_json(&key).await {
+        return Ok(Json(detail));
+    }
+    let detail = build_show_detail(&state, show_id).await?;
+    state.cache.set_json(&key, &detail, SHOW_DETAIL_CACHE_TTL).await;
+    Ok(Json(detail))
+}
+
+async fn build_show_detail(state: &AppState, show_id: Uuid) -> Result<ShowDetail, AppError> {
+    let show = load_show(state, show_id).await?;
 
     // Counts come from the same single-statement read as the seat list, so
     // they always sum to total_seats.
@@ -134,11 +170,11 @@ async fn get_show(
         }
     }
 
-    Ok(Json(ShowDetail {
+    Ok(ShowDetail {
         show,
         counts,
         seats,
-    }))
+    })
 }
 
 /// Row letters then seat number numerically, so A2 sorts before A10.
@@ -216,7 +252,7 @@ async fn reserve_seats(
     }
     let request_hash = request_hash(show_id, &seats);
 
-    let show = fetch_show(&state.pool, show_id).await?;
+    let show = load_show(state, show_id).await?;
 
     // A retry of a request that already succeeded must replay, not hit the
     // fast-path decline below (its seats are now confirmed — by this user).
@@ -313,6 +349,7 @@ async fn reserve_seats(
     }
 
     tx.commit().await?;
+    state.cache.delete(&show_detail_key(show_id)).await;
     Ok(Reserved::Created(reservation))
 }
 

@@ -3,12 +3,14 @@ use std::sync::Arc;
 use sqlx::PgPool;
 use tokio::sync::Semaphore;
 
+use crate::cache::Cache;
 use crate::config::Config;
 use crate::metrics::Metrics;
 
 #[derive(Clone)]
 pub struct AppState {
     pub pool: PgPool,
+    pub cache: Cache,
     pub config: Arc<Config>,
     pub metrics: Arc<Metrics>,
     /// Bounds how many requests enter the reserve handler at once, ahead of

@@ -1,4 +1,5 @@
 mod auth;
+mod cache;
 mod config;
 mod error;
 mod metrics;
@@ -17,6 +18,7 @@ use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetReques
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
+use cache::Cache;
 use config::Config;
 use metrics::Metrics;
 use state::AppState;
@@ -42,11 +44,16 @@ async fn main() -> anyhow::Result<()> {
 
     sqlx::migrate!("./migrations").run(&pool).await?;
 
+    let metrics = Arc::new(Metrics::new());
+    let cache = Cache::connect(config.cache_url.as_deref(), metrics.clone()).await?;
+    tracing::info!(enabled = cache.enabled(), "cache");
+
     let state = AppState {
         pool,
+        cache,
         reserve_semaphore: Arc::new(Semaphore::new(config.reserve_semaphore_permits)),
         config: Arc::new(config.clone()),
-        metrics: Arc::new(Metrics::new()),
+        metrics,
     };
 
     let request_id_header = HeaderName::from_static("x-request-id");
