@@ -1,6 +1,7 @@
 mod auth;
 mod config;
 mod error;
+mod metrics;
 mod models;
 mod routes;
 mod state;
@@ -17,6 +18,7 @@ use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
 use config::Config;
+use metrics::Metrics;
 use state::AppState;
 
 #[tokio::main]
@@ -44,6 +46,7 @@ async fn main() -> anyhow::Result<()> {
         pool,
         reserve_semaphore: Arc::new(Semaphore::new(config.reserve_semaphore_permits)),
         config: Arc::new(config.clone()),
+        metrics: Arc::new(Metrics::new()),
     };
 
     let request_id_header = HeaderName::from_static("x-request-id");

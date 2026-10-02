@@ -162,6 +162,11 @@ struct KeyedReservation {
     reservation: Reservation,
 }
 
+enum Reserved {
+    Created(Reservation),
+    Replayed(Reservation),
+}
+
 async fn reserve(
     State(state): State<AppState>,
     Path(show_id): Path<Uuid>,
@@ -169,6 +174,24 @@ async fn reserve(
     headers: HeaderMap,
     Json(req): Json<ReserveRequest>,
 ) -> Result<(StatusCode, Json<Reservation>), AppError> {
+    let outcome = reserve_seats(&state, show_id, &user, &headers, req).await;
+    match &outcome {
+        Ok(Reserved::Created(_)) => state.metrics.record_confirmed(),
+        Ok(Reserved::Replayed(_)) => state.metrics.record_declined("idempotent_replay"),
+        Err(AppError::Conflict(reason)) => state.metrics.record_declined(reason),
+        Err(_) => {}
+    }
+    let (Reserved::Created(reservation) | Reserved::Replayed(reservation)) = outcome?;
+    Ok((StatusCode::CREATED, Json(reservation)))
+}
+
+async fn reserve_seats(
+    state: &AppState,
+    show_id: Uuid,
+    user: &AuthUser,
+    headers: &HeaderMap,
+    req: ReserveRequest,
+) -> Result<Reserved, AppError> {
     let key = headers
         .get("idempotency-key")
         .and_then(|v| v.to_str().ok())
@@ -290,7 +313,7 @@ async fn reserve(
     }
 
     tx.commit().await?;
-    Ok((StatusCode::CREATED, Json(reservation)))
+    Ok(Reserved::Created(reservation))
 }
 
 /// Locks the seat rows in label order before anything updates them; an
@@ -311,12 +334,9 @@ pub(super) async fn lock_seats(
     Ok(())
 }
 
-fn replay(
-    existing: KeyedReservation,
-    request_hash: &str,
-) -> Result<(StatusCode, Json<Reservation>), AppError> {
+fn replay(existing: KeyedReservation, request_hash: &str) -> Result<Reserved, AppError> {
     if existing.request_hash == request_hash {
-        Ok((StatusCode::CREATED, Json(existing.reservation)))
+        Ok(Reserved::Replayed(existing.reservation))
     } else {
         Err(AppError::Conflict("idempotency_mismatch"))
     }

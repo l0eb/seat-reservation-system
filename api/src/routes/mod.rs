@@ -1,16 +1,19 @@
 mod auth;
+mod health;
 mod reservations;
 mod shows;
 
-use axum::Router;
+use axum::{middleware, Router};
 
+use crate::metrics::track_status;
 use crate::state::AppState;
 
-/// Assembled incrementally as each route group lands.
 pub fn router(state: AppState) -> Router {
     Router::new()
         .merge(auth::router())
+        .merge(health::router())
         .merge(shows::router())
         .merge(reservations::router())
+        .layer(middleware::from_fn_with_state(state.clone(), track_status))
         .with_state(state)
 }
