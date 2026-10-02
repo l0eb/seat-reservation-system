@@ -13,7 +13,22 @@ pub struct Show {
 
 pub const SHOW_COLUMNS: &str = "id, name, price_paise, per_user_limit, total_seats";
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[serde(rename_all = "lowercase")]
+#[sqlx(type_name = "text", rename_all = "lowercase")]
+pub enum SeatStatus {
+    Available,
+    Held,
+    Confirmed,
+}
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct Seat {
+    pub label: String,
+    pub status: SeatStatus,
+}
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Reservation {
     pub id: Uuid,
     pub show_id: Uuid,

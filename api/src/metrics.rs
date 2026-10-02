@@ -8,12 +8,33 @@ use uuid::Uuid;
 
 use crate::state::AppState;
 
-pub const DECLINE_REASONS: [&str; 4] = [
-    "seat_taken",
-    "per_user_limit",
-    "idempotent_replay",
-    "idempotency_mismatch",
-];
+/// Reserve requests that confirmed nothing new. A replay returns 201 but
+/// still counts here, since it books no seats.
+#[derive(Debug, Clone, Copy)]
+pub enum Decline {
+    SeatTaken,
+    PerUserLimit,
+    IdempotentReplay,
+    IdempotencyMismatch,
+}
+
+impl Decline {
+    const ALL: [Decline; 4] = [
+        Decline::SeatTaken,
+        Decline::PerUserLimit,
+        Decline::IdempotentReplay,
+        Decline::IdempotencyMismatch,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Decline::SeatTaken => "seat_taken",
+            Decline::PerUserLimit => "per_user_limit",
+            Decline::IdempotentReplay => "idempotent_replay",
+            Decline::IdempotencyMismatch => "idempotency_mismatch",
+        }
+    }
+}
 
 pub const CACHE_RESULTS: [&str; 4] = ["hit", "miss", "error", "bypassed"];
 
@@ -21,7 +42,7 @@ pub const CACHE_RESULTS: [&str; 4] = ["hit", "miss", "error", "bypassed"];
 /// instance; seat gauges are read from the database at scrape time instead.
 pub struct Metrics {
     reservations_confirmed: AtomicU64,
-    reservations_declined: [AtomicU64; DECLINE_REASONS.len()],
+    reservations_declined: [AtomicU64; Decline::ALL.len()],
     cache_lookups: [AtomicU64; CACHE_RESULTS.len()],
     /// Indexed by HTTP status code.
     http_requests: Vec<AtomicU64>,
@@ -41,10 +62,8 @@ impl Metrics {
         self.reservations_confirmed.fetch_add(1, Relaxed);
     }
 
-    pub fn record_declined(&self, reason: &str) {
-        if let Some(i) = DECLINE_REASONS.iter().position(|r| *r == reason) {
-            self.reservations_declined[i].fetch_add(1, Relaxed);
-        }
+    pub fn record_declined(&self, reason: Decline) {
+        self.reservations_declined[reason as usize].fetch_add(1, Relaxed);
     }
 
     pub fn record_cache(&self, result: &str) {
@@ -67,9 +86,10 @@ impl Metrics {
 
         out.push_str("# HELP reservations_declined_total Reserve requests that confirmed nothing new, by reason.\n");
         out.push_str("# TYPE reservations_declined_total counter\n");
-        for (reason, counter) in DECLINE_REASONS.iter().zip(&self.reservations_declined) {
-            let n = counter.load(Relaxed);
-            let _ = writeln!(out, "reservations_declined_total{{reason=\"{reason}\"}} {n}");
+        for reason in Decline::ALL {
+            let n = self.reservations_declined[reason as usize].load(Relaxed);
+            let label = reason.label();
+            let _ = writeln!(out, "reservations_declined_total{{reason=\"{label}\"}} {n}");
         }
 
         out.push_str("# HELP cache_lookups_total Cache reads, by result.\n");
@@ -100,9 +120,13 @@ pub struct ShowSeatCounts {
 
 pub fn render_seat_gauges(out: &mut String, shows: &[ShowSeatCounts]) {
     let gauges: [(&str, &str, fn(&ShowSeatCounts) -> i64); 3] = [
-        ("seats_available", "Seats available, per show.", |s| s.available),
+        ("seats_available", "Seats available, per show.", |s| {
+            s.available
+        }),
         ("seats_held", "Seats held, per show.", |s| s.held),
-        ("seats_confirmed", "Seats confirmed, per show.", |s| s.confirmed),
+        ("seats_confirmed", "Seats confirmed, per show.", |s| {
+            s.confirmed
+        }),
     ];
     for (name, help, value) in gauges {
         let _ = writeln!(out, "# HELP {name} {help}");
@@ -127,9 +151,8 @@ mod tests {
     fn renders_counters_with_zeroed_reasons() {
         let m = Metrics::new();
         m.record_confirmed();
-        m.record_declined("seat_taken");
-        m.record_declined("seat_taken");
-        m.record_declined("not_a_reason");
+        m.record_declined(Decline::SeatTaken);
+        m.record_declined(Decline::SeatTaken);
         m.record_http_status(201);
         let mut out = String::new();
         m.render(&mut out);
@@ -146,7 +169,12 @@ mod tests {
         let mut out = String::new();
         render_seat_gauges(
             &mut out,
-            &[ShowSeatCounts { show_id: id, available: 7, held: 0, confirmed: 3 }],
+            &[ShowSeatCounts {
+                show_id: id,
+                available: 7,
+                held: 0,
+                confirmed: 3,
+            }],
         );
         assert!(out.contains(&format!("seats_available{{show=\"{id}\"}} 7\n")));
         assert!(out.contains(&format!("seats_confirmed{{show=\"{id}\"}} 3\n")));
