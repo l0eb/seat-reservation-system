@@ -1,6 +1,7 @@
 mod auth;
 mod config;
 mod error;
+mod models;
 mod routes;
 mod state;
 
@@ -24,7 +25,9 @@ async fn main() -> anyhow::Result<()> {
 
     tracing_subscriber::fmt()
         .json()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .init();
 
     let config = Config::from_env()?;
