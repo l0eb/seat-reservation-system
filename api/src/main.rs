@@ -1,4 +1,6 @@
+mod auth;
 mod config;
+mod error;
 mod routes;
 mod state;
 
