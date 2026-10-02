@@ -17,6 +17,17 @@ services:
       timeout: 5s
       retries: 10
 
+  dragonfly:
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:latest
+    container_name: seat-reservation-dragonfly
+    restart: unless-stopped
+    # Dragonfly needs 256mb per thread; it defaults to one thread per core.
+    command: ["--proactor_threads=2", "--maxmemory=512mb", "--cache_mode=true"]
+    ulimits:
+      memlock: -1
+    ports:
+      - "6379:6379"
+
   pgadmin:
     image: dpage/pgadmin4:latest
     container_name: seat-reservation-pgadmin
