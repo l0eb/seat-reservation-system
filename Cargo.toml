@@ -1,0 +1,6 @@
+[workspace]
+resolver = "2"
+members = ["api", "burst"]
+
+[workspace.package]
+edition = "2021"
