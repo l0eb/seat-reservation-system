@@ -1,21 +1,25 @@
 use std::time::Duration;
 
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::PgExecutor;
 use uuid::Uuid;
 
 use crate::auth::AuthUser;
 use crate::error::AppError;
+use crate::extract::{JsonBody, PathParam, QueryParams};
 use crate::models::{Seat, SeatStatus, Show, SHOW_COLUMNS};
 use crate::state::AppState;
 
 const MAX_ROWS: u32 = 26;
 const MAX_SEATS_PER_ROW: u32 = 500;
 const DEFAULT_PER_USER_LIMIT: i32 = 4;
+const DEFAULT_LIST_LIMIT: u32 = 20;
+const MAX_LIST_LIMIT: u32 = 100;
 /// Shows can't be edited after creation, so this only bounds memory use.
 const SHOW_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
 /// Writes delete the entry on commit; the TTL bounds the one race that
@@ -25,7 +29,7 @@ const _: () = assert!(SHOW_DETAIL_CACHE_TTL.as_secs() < crate::cache::BREAKER_CO
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/shows", post(create_show))
+        .route("/shows", post(create_show).get(list_shows))
         .route("/shows/{id}", get(get_show))
 }
 
@@ -42,7 +46,7 @@ struct CreateShowRequest {
 async fn create_show(
     State(state): State<AppState>,
     user: AuthUser,
-    Json(req): Json<CreateShowRequest>,
+    JsonBody(req): JsonBody<CreateShowRequest>,
 ) -> Result<(StatusCode, Json<Show>), AppError> {
     if !user.is_admin {
         return Err(AppError::Forbidden("admin role required"));
@@ -114,9 +118,66 @@ struct ShowDetail {
     seats: Vec<Seat>,
 }
 
+#[derive(Deserialize)]
+struct ListShowsQuery {
+    limit: Option<u32>,
+    after: Option<Uuid>,
+}
+
+#[derive(Serialize)]
+struct ShowPage {
+    shows: Vec<Show>,
+    next: Option<Uuid>,
+}
+
+async fn list_shows(
+    State(state): State<AppState>,
+    QueryParams(query): QueryParams<ListShowsQuery>,
+) -> Result<Json<ShowPage>, AppError> {
+    let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
+    if !(1..=MAX_LIST_LIMIT).contains(&limit) {
+        return Err(AppError::Validation(format!(
+            "limit must be 1..={MAX_LIST_LIMIT}"
+        )));
+    }
+
+    // Keyset paging on (created_at, id): new shows don't shift later pages.
+    let cursor: Option<(DateTime<Utc>, Uuid)> = match query.after {
+        None => None,
+        Some(after) => Some(
+            sqlx::query_as("select created_at, id from shows where id = $1")
+                .bind(after)
+                .fetch_optional(&state.pool)
+                .await?
+                .ok_or_else(|| AppError::Validation(format!("unknown cursor: {after}")))?,
+        ),
+    };
+
+    let mut shows: Vec<Show> = sqlx::query_as(&format!(
+        "select {SHOW_COLUMNS} from shows
+         where $1::timestamptz is null or (created_at, id) < ($1, $2)
+         order by created_at desc, id desc
+         limit $3"
+    ))
+    .bind(cursor.map(|(created_at, _)| created_at))
+    .bind(cursor.map(|(_, id)| id))
+    .bind(i64::from(limit) + 1)
+    .fetch_all(&state.pool)
+    .await?;
+
+    let next = if shows.len() > limit as usize {
+        shows.truncate(limit as usize);
+        shows.last().map(|show| show.id)
+    } else {
+        None
+    };
+
+    Ok(Json(ShowPage { shows, next }))
+}
+
 async fn get_show(
     State(state): State<AppState>,
-    Path(show_id): Path<Uuid>,
+    PathParam(show_id): PathParam<Uuid>,
 ) -> Result<Json<ShowDetail>, AppError> {
     let key = show_detail_key(show_id);
     if let Some(detail) = state.cache.get_json(&key).await {

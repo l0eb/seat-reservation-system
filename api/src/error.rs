@@ -1,3 +1,4 @@
+use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -30,6 +31,8 @@ pub enum AppError {
     NotFound(&'static str),
     Conflict(Conflict),
     Validation(String),
+    /// The request couldn't be parsed; keeps the status axum chose.
+    Rejected(StatusCode, String),
     Internal(anyhow::Error),
 }
 
@@ -41,6 +44,7 @@ impl IntoResponse for AppError {
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.to_string()),
             AppError::Conflict(reason) => (StatusCode::CONFLICT, reason.as_str().to_string()),
             AppError::Validation(msg) => (StatusCode::UNPROCESSABLE_ENTITY, msg),
+            AppError::Rejected(status, msg) => (status, msg),
             AppError::Internal(err) => {
                 tracing::error!(error = %err, "internal error");
                 (
@@ -64,3 +68,15 @@ impl From<sqlx::Error> for AppError {
         AppError::Internal(err.into())
     }
 }
+
+macro_rules! from_rejection {
+    ($($rejection:ty),*) => {$(
+        impl From<$rejection> for AppError {
+            fn from(rejection: $rejection) -> Self {
+                AppError::Rejected(rejection.status(), rejection.body_text())
+            }
+        }
+    )*};
+}
+
+from_rejection!(JsonRejection, QueryRejection, PathRejection);

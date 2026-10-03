@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::mint_token;
 use crate::error::AppError;
+use crate::extract::JsonBody;
 use crate::state::AppState;
 
 const TEST_TOKEN_TTL_SECS: i64 = 24 * 60 * 60;
@@ -29,7 +30,7 @@ pub fn router() -> Router<AppState> {
 /// default — must not be reachable against a show that's actually on sale.
 async fn mint(
     State(state): State<AppState>,
-    Json(req): Json<MintTokenRequest>,
+    JsonBody(req): JsonBody<MintTokenRequest>,
 ) -> Result<Json<MintTokenResponse>, AppError> {
     if !state.config.auth_token_route_enabled {
         return Err(AppError::NotFound("not found"));

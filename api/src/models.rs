@@ -9,9 +9,10 @@ pub struct Show {
     pub price_paise: i64,
     pub per_user_limit: i32,
     pub total_seats: i32,
+    pub created_at: DateTime<Utc>,
 }
 
-pub const SHOW_COLUMNS: &str = "id, name, price_paise, per_user_limit, total_seats";
+pub const SHOW_COLUMNS: &str = "id, name, price_paise, per_user_limit, total_seats, created_at";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
 #[serde(rename_all = "lowercase")]

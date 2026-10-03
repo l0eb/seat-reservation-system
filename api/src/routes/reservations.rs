@@ -2,7 +2,7 @@
 //! order — idempotency key, then the user's counter, then seats by label —
 //! so concurrent reserves and cancels can't deadlock each other.
 
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::post;
 use axum::{Json, Router};
@@ -14,6 +14,7 @@ use uuid::Uuid;
 use super::shows::{load_show, show_detail_key};
 use crate::auth::AuthUser;
 use crate::error::{AppError, Conflict};
+use crate::extract::{JsonBody, PathParam};
 use crate::metrics::Decline;
 use crate::models::{Reservation, Seat, SeatStatus, Show, RESERVATION_COLUMNS};
 use crate::state::AppState;
@@ -55,10 +56,10 @@ struct KeyedReservation {
 
 async fn reserve(
     State(state): State<AppState>,
-    Path(show_id): Path<Uuid>,
+    PathParam(show_id): PathParam<Uuid>,
     user: AuthUser,
     headers: HeaderMap,
-    Json(req): Json<ReserveRequest>,
+    JsonBody(req): JsonBody<ReserveRequest>,
 ) -> Result<(StatusCode, Json<Reservation>), AppError> {
     let input = parse_reserve_input(show_id, &headers, req)?;
     let outcome = reserve_seats(&state, show_id, &user, &input).await;
@@ -270,7 +271,7 @@ fn request_hash(show_id: Uuid, sorted_seats: &[String]) -> String {
 
 async fn cancel(
     State(state): State<AppState>,
-    Path(reservation_id): Path<Uuid>,
+    PathParam(reservation_id): PathParam<Uuid>,
     user: AuthUser,
 ) -> Result<Json<Reservation>, AppError> {
     let mut tx = state.pool.begin().await?;

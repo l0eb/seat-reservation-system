@@ -2,6 +2,7 @@ mod auth;
 mod cache;
 mod config;
 mod error;
+mod extract;
 mod metrics;
 mod models;
 mod routes;
