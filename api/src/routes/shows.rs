@@ -129,6 +129,7 @@ async fn create_show(
         .bind(&labels)
         .execute(&mut *tx)
         .await?;
+    crate::seat_map::notify_show(&mut tx, show.id).await?;
     tx.commit().await?;
     state.seat_map.add_show(show.id, &labels);
 

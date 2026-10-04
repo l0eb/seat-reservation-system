@@ -25,7 +25,7 @@ use crate::extract::{JsonBody, PathParam};
 use crate::idempotency::{request_hash, required_key, IdempotencyKey};
 use crate::metrics::{Decline, ReservePath};
 use crate::models::{Reservation, Seat, SeatStatus, Show, RESERVATION_COLUMNS};
-use crate::seat_map::{Gate, SeatChange};
+use crate::seat_map::{self, Gate, SeatChange};
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
@@ -302,8 +302,11 @@ async fn claim_seats(
     if claimed.len() != input.seats.len() {
         return Err(AppError::Conflict(Conflict::SeatTaken));
     }
-
     tx.commit().await?;
+    // After commit, outside the transaction: see seat_map for why.
+    state
+        .seat_map
+        .announce_booking(show.id, &user.user_id, &claimed);
     // After commit, so the map never shows a seat taken that isn't.
     state.seat_map.add_user(&user.user_id);
     let owner: Arc<str> = Arc::from(user.user_id.as_str());
@@ -415,8 +418,10 @@ async fn cancel(
     .fetch_all(&mut *tx)
     .await?;
 
-    // Before commit, so the map never shows a seat taken that isn't. If the
-    // commit fails, the seats only look free: Postgres still declines them.
+    seat_map::notify_seats(&mut tx, reservation.show_id, None, &freed).await?;
+    // Before commit, so this replica's map never shows a seat taken that
+    // isn't. If the commit fails, the seats only look free: Postgres still
+    // declines them. Other replicas hear of it on commit.
     let changes = freed
         .into_iter()
         .map(|(label, version)| SeatChange {

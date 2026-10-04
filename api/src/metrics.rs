@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fmt::Write;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
@@ -49,8 +50,9 @@ pub enum ReservePath {
 const RESERVE_PATHS: [&str; 2] = ["memory", "database"];
 const RETRY_RESULTS: [&str; 2] = ["recovered", "failed"];
 
-/// In-process counters. Exact only because the service runs as a single
-/// instance; seat gauges are read from the database at scrape time instead.
+/// In-process counters, one set per replica: /metrics adds up every
+/// replica's (see `merge`). Seat gauges are read from the database at
+/// scrape time instead.
 pub struct Metrics {
     reservations_confirmed: AtomicU64,
     reservations_declined: [AtomicU64; Decline::ALL.len()],
@@ -60,6 +62,8 @@ pub struct Metrics {
     reserve_retries: [AtomicU64; RETRY_RESULTS.len()],
     /// Indexed by HTTP status code.
     http_requests: Vec<AtomicU64>,
+    /// Unix seconds; counters count from here.
+    started_at: u64,
 }
 
 impl Metrics {
@@ -72,7 +76,15 @@ impl Metrics {
             reserve_shed: AtomicU64::new(0),
             reserve_retries: Default::default(),
             http_requests: (0..600).map(|_| AtomicU64::new(0)).collect(),
+            started_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
         }
+    }
+
+    pub fn started_at(&self) -> u64 {
+        self.started_at
     }
 
     pub fn record_confirmed(&self) {
@@ -203,6 +215,100 @@ pub fn render_seat_map(out: &mut String, taken: &[(Uuid, i64)]) {
     }
 }
 
+/// Gauges that describe one process and mean nothing summed: these keep a
+/// `replica` label in the merged output instead.
+const PER_REPLICA: [&str; 3] = [
+    "reserve_inflight",
+    "seat_map_taken",
+    "process_start_time_seconds",
+];
+
+/// Every replica's /metrics/local in one exposition: counters summed across
+/// replicas, per-replica gauges labelled with their replica, and
+/// `replica_up` saying whose numbers are in the totals. A replica that
+/// didn't answer is `None`, named by its URL.
+pub fn merge(replicas: &[(String, Option<String>)]) -> String {
+    struct Family {
+        header: Vec<String>,
+        samples: Vec<String>,
+    }
+    let mut order: Vec<String> = Vec::new();
+    let mut families: HashMap<String, Family> = HashMap::new();
+    let mut totals: HashMap<String, u64> = HashMap::new();
+
+    for (replica, text) in replicas {
+        let Some(text) = text else { continue };
+        let mut current = String::new();
+        for line in text.lines() {
+            if let Some(rest) = line
+                .strip_prefix("# HELP ")
+                .or(line.strip_prefix("# TYPE "))
+            {
+                current = rest.split(' ').next().unwrap_or_default().to_string();
+                let family = families.entry(current.clone()).or_insert_with(|| {
+                    order.push(current.clone());
+                    Family {
+                        header: Vec::new(),
+                        samples: Vec::new(),
+                    }
+                });
+                if family.header.len() < 2 && !family.header.iter().any(|h| h == line) {
+                    family.header.push(line.to_string());
+                }
+                continue;
+            }
+            let Some((series, value)) = line.rsplit_once(' ') else {
+                continue;
+            };
+            let Ok(value) = value.parse::<u64>() else {
+                continue;
+            };
+            let Some(family) = families.get_mut(&current) else {
+                continue;
+            };
+            let series = if PER_REPLICA.contains(&current.as_str()) {
+                with_label(series, "replica", replica)
+            } else {
+                series.to_string()
+            };
+            match totals.get_mut(&series) {
+                Some(total) if !PER_REPLICA.contains(&current.as_str()) => *total += value,
+                Some(_) => {}
+                None => {
+                    family.samples.push(series.clone());
+                    totals.insert(series, value);
+                }
+            }
+        }
+    }
+
+    let mut out = String::new();
+    out.push_str("# HELP replica_up Replicas whose counters are in the totals below (1), or that did not answer (0).\n");
+    out.push_str("# TYPE replica_up gauge\n");
+    for (replica, text) in replicas {
+        let up = u8::from(text.is_some());
+        let _ = writeln!(out, "replica_up{{replica=\"{replica}\"}} {up}");
+    }
+    for name in order {
+        let family = &families[&name];
+        for line in &family.header {
+            let _ = writeln!(out, "{line}");
+        }
+        for series in &family.samples {
+            let _ = writeln!(out, "{series} {}", totals[series]);
+        }
+    }
+    out
+}
+
+/// `name{a="1"}` + b="2" -> `name{a="1",b="2"}`.
+fn with_label(series: &str, key: &str, value: &str) -> String {
+    match series.strip_suffix('}') {
+        Some(open) => format!("{open},{key}=\"{value}\"}}"),
+        None => format!("{series}{{{key}=\"{value}\"}}"),
+    }
+}
+
 pub async fn track_status(State(state): State<AppState>, req: Request, next: Next) -> Response {
     let response = next.run(req).await;
     state.metrics.record_http_status(response.status().as_u16());
@@ -244,5 +350,32 @@ mod tests {
         );
         assert!(out.contains(&format!("seats_available{{show=\"{id}\"}} 7\n")));
         assert!(out.contains(&format!("seats_confirmed{{show=\"{id}\"}} 3\n")));
+    }
+
+    #[test]
+    fn merge_sums_counters_and_labels_per_replica_gauges() {
+        let a = "# HELP c_total C.\n# TYPE c_total counter\nc_total{reason=\"x\"} 2\n\
+                 # HELP seat_map_taken M.\n# TYPE seat_map_taken gauge\nseat_map_taken{show=\"s\"} 5\n";
+        let b = "# HELP c_total C.\n# TYPE c_total counter\nc_total{reason=\"x\"} 3\nc_total{reason=\"y\"} 1\n\
+                 # HELP seat_map_taken M.\n# TYPE seat_map_taken gauge\nseat_map_taken{show=\"s\"} 5\n";
+        let out = merge(&[
+            ("api-1".into(), Some(a.into())),
+            ("api-2".into(), Some(b.into())),
+            ("http://api-3:8080".into(), None),
+        ]);
+        assert!(out.contains("c_total{reason=\"x\"} 5\n"));
+        assert!(out.contains("c_total{reason=\"y\"} 1\n"));
+        assert!(out.contains("seat_map_taken{show=\"s\",replica=\"api-1\"} 5\n"));
+        assert!(out.contains("seat_map_taken{show=\"s\",replica=\"api-2\"} 5\n"));
+        assert!(out.contains("replica_up{replica=\"http://api-3:8080\"} 0\n"));
+        assert_eq!(out.matches("# TYPE c_total counter").count(), 1);
+    }
+
+    #[test]
+    fn unlabelled_series_get_a_replica_label() {
+        assert_eq!(
+            with_label("reserve_inflight", "replica", "a"),
+            "reserve_inflight{replica=\"a\"}"
+        );
     }
 }

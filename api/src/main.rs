@@ -10,6 +10,7 @@ mod routes;
 mod seat_map;
 mod state;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -25,7 +26,6 @@ use tracing_subscriber::EnvFilter;
 use cache::Cache;
 use config::Config;
 use metrics::Metrics;
-use seat_map::SeatMap;
 use state::AppState;
 
 #[tokio::main]
@@ -65,7 +65,8 @@ async fn main() -> anyhow::Result<()> {
 
     sqlx::migrate!("./migrations").run(&pool).await?;
 
-    let seat_map = Arc::new(SeatMap::load(&pool).await?);
+    // Loads the seat map and keeps it in step with the other replicas.
+    let seat_map = seat_map::listen(pool.clone()).await?;
     let metrics = Arc::new(Metrics::new());
     let cache = Cache::connect(config.cache_url.as_deref(), metrics.clone()).await?;
     tracing::info!(enabled = cache.enabled(), "cache");
@@ -77,7 +78,11 @@ async fn main() -> anyhow::Result<()> {
         config: Arc::new(config.clone()),
         metrics,
         seat_map,
+        http: reqwest::Client::new(),
+        draining: Arc::new(AtomicBool::new(false)),
     };
+    let draining = state.draining.clone();
+    let drain_for = Duration::from_secs(state.config.shutdown_drain_secs);
 
     let request_id_header = HeaderName::from_static("x-request-id");
 
@@ -91,7 +96,7 @@ async fn main() -> anyhow::Result<()> {
     let listener = TcpListener::bind(("0.0.0.0", config.port)).await?;
     tracing::info!(port = config.port, "listening");
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(shutdown_signal(draining, drain_for))
         .await?;
     tracing::info!("shut down");
 
@@ -124,9 +129,12 @@ async fn connect_with_retry(
     }
 }
 
-/// Stop accepting on SIGTERM (what a platform sends on deploy) or Ctrl-C,
-/// and let in-flight requests finish.
-async fn shutdown_signal() {
+/// On SIGTERM (what a platform sends on deploy) or Ctrl-C: fail /readyz
+/// for `drain_for` while still serving, so a load balancer's health check
+/// stops sending traffic here; then stop accepting and let in-flight
+/// requests finish. Without the first step, a request can reach a
+/// connection that is closing and come back as a 502.
+async fn shutdown_signal(draining: Arc<AtomicBool>, drain_for: Duration) {
     let ctrl_c = async {
         tokio::signal::ctrl_c().await.ok();
     };
@@ -144,7 +152,12 @@ async fn shutdown_signal() {
         _ = ctrl_c => {},
         _ = terminate => {},
     }
-    tracing::info!("shutdown signal received, draining");
+    draining.store(true, Ordering::Relaxed);
+    tracing::info!(
+        drain_secs = drain_for.as_secs(),
+        "shutdown signal received, draining"
+    );
+    tokio::time::sleep(drain_for).await;
 }
 
 async fn healthcheck(port: &str) -> std::io::Result<bool> {

@@ -1,3 +1,4 @@
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use sqlx::PgPool;
@@ -19,4 +20,9 @@ pub struct AppState {
     /// below the pool so reads, /readyz and /metrics always find a
     /// connection; waiters are served in arrival order.
     pub reserve_semaphore: Arc<Semaphore>,
+    /// For fetching the other replicas' counters.
+    pub http: reqwest::Client,
+    /// Set on SIGTERM: /readyz fails so the load balancer moves traffic
+    /// away before this replica stops.
+    pub draining: Arc<AtomicBool>,
 }

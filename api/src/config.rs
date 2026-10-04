@@ -14,6 +14,13 @@ pub struct Config {
     pub reserve_queue_timeout_secs: u64,
     pub db_statement_timeout_secs: u64,
     pub auth_token_route_enabled: bool,
+    /// This replica's name in metrics, e.g. "api-1".
+    pub replica_id: String,
+    /// Base URLs of the other replicas, whose counters /metrics adds in.
+    pub peers: Vec<String>,
+    /// On SIGTERM, fail /readyz this long before closing connections, so a
+    /// load balancer stops routing here first. 0 when there is none.
+    pub shutdown_drain_secs: u64,
 }
 
 impl Config {
@@ -31,6 +38,17 @@ impl Config {
             auth_token_route_enabled: env::var("AUTH_TOKEN_ROUTE_ENABLED")
                 .map(|v| v == "true")
                 .unwrap_or(false),
+            replica_id: env::var("REPLICA_ID")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .unwrap_or_else(|| "api".into()),
+            peers: env::var("PEERS")
+                .unwrap_or_default()
+                .split(',')
+                .map(|p| p.trim().trim_end_matches('/').to_string())
+                .filter(|p| !p.is_empty())
+                .collect(),
+            shutdown_drain_secs: parse_env("SHUTDOWN_DRAIN_SECS", 0)?,
         })
     }
 }

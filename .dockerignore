@@ -5,3 +5,4 @@ target
 pgadmin
 Dockerfile
 docker-compose.yml
+caddy

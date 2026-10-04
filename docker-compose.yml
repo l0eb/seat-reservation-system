@@ -1,27 +1,74 @@
 # `docker compose up --build` runs the service the way it deploys: the
-# same image, configured only through the environment.
+# same image, configured only through the environment, three replicas
+# behind Caddy on :8080.
 # pgAdmin is opt-in: `docker compose --profile tools up`.
 
 services:
-  api:
+  # Three replicas of one image behind Caddy, as deployed. Each keeps its
+  # own seat map, kept in step through Postgres LISTEN/NOTIFY, and adds its
+  # peers' counters into /metrics. Pool and permits are per replica, sized
+  # so the three together load Postgres about as much as one did.
+  api-1: &api
     build: .
     image: seat-reservation-api
-    container_name: seat-reservation-api
+    container_name: seat-reservation-api-1
     restart: unless-stopped
-    environment:
+    environment: &api-env
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/seats
       CACHE_URL: redis://dragonfly:6379
       JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
       # Mints test tokens for the burst tool; never enable with a real secret.
       AUTH_TOKEN_ROUTE_ENABLED: "true"
       PORT: "8080"
-    ports:
-      - "8080:8080"
+      DB_POOL_MAX_CONNECTIONS: "14"
+      RESERVE_SEMAPHORE_PERMITS: "10"
+      # Fail /readyz this long on SIGTERM before closing, so Caddy's health
+      # check (every 2s) moves traffic away first.
+      SHUTDOWN_DRAIN_SECS: "4"
+      REPLICA_ID: api-1
+      PEERS: http://api-2:8080,http://api-3:8080
     depends_on:
       postgres:
         condition: service_healthy
       dragonfly:
         condition: service_started
+
+  api-2:
+    <<: *api
+    container_name: seat-reservation-api-2
+    environment:
+      <<: *api-env
+      REPLICA_ID: api-2
+      PEERS: http://api-1:8080,http://api-3:8080
+
+  api-3:
+    <<: *api
+    container_name: seat-reservation-api-3
+    environment:
+      <<: *api-env
+      REPLICA_ID: api-3
+      PEERS: http://api-1:8080,http://api-2:8080
+
+  lb:
+    image: caddy:2
+    container_name: seat-reservation-lb
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/readyz"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+    depends_on:
+      api-1:
+        condition: service_healthy
+      api-2:
+        condition: service_healthy
+      api-3:
+        condition: service_healthy
 
   postgres:
     image: postgres:16
