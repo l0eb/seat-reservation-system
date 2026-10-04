@@ -207,7 +207,7 @@ fn reconcile(ctx: &mut Ctx, before: &Metrics, after: &Metrics, seen: Totals) {
         r.skip(
             NAME,
             "counters match what the client saw",
-            format!("{who} restarted during the run, so its counters reset"),
+            format!("{who} restarted during the run (counters reset on restart)"),
         );
     } else {
         let confirmed = delta("reservations_confirmed_total");

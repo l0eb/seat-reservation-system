@@ -2,3 +2,6 @@
 **/target
 .env
 Seat_Reservation_Tracker.xlsx
+
+# Office/LibreOffice lock file while the tracker is open
+.~lock.*#
