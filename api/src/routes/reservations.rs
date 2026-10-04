@@ -319,7 +319,8 @@ async fn claim_seats(
         })
         .collect();
     state.seat_map.apply(show.id, changes);
-    state.cache.delete(&show_detail_key(show.id)).await;
+    // The cached show page is left to expire (2 s) rather than deleted:
+    // during an on-sale every booking would otherwise force a full rebuild.
     Ok(Reserved::Created(reservation))
 }
 

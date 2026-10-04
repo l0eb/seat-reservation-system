@@ -10,6 +10,9 @@ use serde_json::{json, Value};
 use crate::metrics::Metrics;
 
 const MINT_CONCURRENCY: usize = 256;
+/// The service caches GET /shows/{id} for 2 s and doesn't clear it on
+/// bookings; a little margin on top.
+const SHOW_PAGE_MAX_AGE: Duration = Duration::from_millis(2500);
 
 #[derive(Clone)]
 pub struct Api {
@@ -179,6 +182,13 @@ impl Api {
             .post(self.url(&format!("/reservations/{reservation}/cancel")))
             .bearer_auth(token);
         self.send(request).await
+    }
+
+    /// GET /shows/{id} once any copy cached before the last booking has
+    /// expired: the service lets the show page lag bookings by up to 2 s.
+    pub async fn show_settled(&self, show: &str) -> Result<ShowState> {
+        tokio::time::sleep(SHOW_PAGE_MAX_AGE).await;
+        self.show(show).await
     }
 
     pub async fn show(&self, show: &str) -> Result<ShowState> {

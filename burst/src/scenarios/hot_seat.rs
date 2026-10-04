@@ -83,7 +83,7 @@ pub async fn run(ctx: &mut Ctx, buyers: usize) -> Result<Totals> {
         format!("{failures}"),
     );
 
-    let state = api.show(&show).await?;
+    let state = api.show_settled(&show).await?;
     r.check(
         NAME,
         "A1 confirmed, the other 9 seats untouched",

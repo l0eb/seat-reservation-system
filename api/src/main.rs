@@ -8,6 +8,7 @@ mod metrics;
 mod models;
 mod routes;
 mod seat_map;
+mod single_flight;
 mod state;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -85,6 +86,8 @@ async fn main() -> anyhow::Result<()> {
         pool,
         cache,
         reserve_semaphore: Arc::new(Semaphore::new(config.reserve_semaphore_permits)),
+        show_read_semaphore: Arc::new(Semaphore::new(config.show_read_permits)),
+        show_reads: Arc::new(single_flight::SingleFlight::new()),
         config: Arc::new(config.clone()),
         metrics,
         seat_map,

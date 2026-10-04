@@ -186,7 +186,7 @@ pub async fn run(ctx: &mut Ctx, opts: &Options) -> Result<Totals> {
     let client_seats: BTreeSet<String> = holders.keys().map(|s| s.to_string()).collect();
     let unsure_seats: BTreeSet<&String> = unsure.iter().flat_map(|s| s.iter()).collect();
 
-    let state = api.show(&show).await?;
+    let state = api.show_settled(&show).await?;
     let missing: Vec<&String> = client_seats
         .difference(&state.confirmed_seats)
         .filter(|s| !unsure_seats.contains(s))

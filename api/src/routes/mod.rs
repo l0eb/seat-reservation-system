@@ -1,7 +1,7 @@
 mod auth;
 mod health;
 mod reservations;
-mod shows;
+pub(crate) mod shows;
 
 use axum::{middleware, Router};
 

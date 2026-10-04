@@ -78,7 +78,7 @@ pub async fn run(ctx: &mut Ctx, users: usize) -> Result<Totals> {
         tally.failures() == 0,
         format!("{}", tally.failures()),
     );
-    let state = api.show(&show).await?;
+    let state = api.show_settled(&show).await?;
     r.check(
         NAME,
         "confirmed seats == users x limit",

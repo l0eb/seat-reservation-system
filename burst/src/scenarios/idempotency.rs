@@ -100,7 +100,7 @@ pub async fn run(ctx: &mut Ctx, users: usize, copies: usize) -> Result<Totals> {
         format!("{failures}"),
     );
 
-    let state = api.show(&show).await?;
+    let state = api.show_settled(&show).await?;
     let expected: std::collections::BTreeSet<String> = seats.iter().cloned().collect();
     r.check(
         NAME,

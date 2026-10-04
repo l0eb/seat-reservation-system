@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::State;
@@ -14,6 +15,7 @@ use crate::error::{AppError, Conflict};
 use crate::extract::{JsonBody, PathParam, QueryParams};
 use crate::idempotency::{request_hash, IdempotencyKey};
 use crate::models::{Seat, SeatStatus, Show, SHOW_COLUMNS};
+use crate::single_flight::SingleFlight;
 use crate::state::AppState;
 
 const MAX_ROWS: u32 = 26;
@@ -25,9 +27,14 @@ const DEFAULT_LIST_LIMIT: u32 = 20;
 const MAX_LIST_LIMIT: u32 = 100;
 /// Shows can't be edited after creation, so this only bounds memory use.
 const SHOW_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
-/// Writes delete the entry on commit; the TTL bounds the one race that
-/// remains (a read that started before the commit re-filling it afterwards).
+/// The show page is for display, so it may lag bookings by up to this long:
+/// during an on-sale, deleting it on every booking meant it was rebuilt
+/// (all of a show's seats, from Postgres) for nearly every read. Bookings
+/// leave it to expire; cancels still delete it, so a freed seat shows up at
+/// once. Counts in any copy still add up: each is one database snapshot.
 const SHOW_DETAIL_CACHE_TTL: Duration = Duration::from_secs(2);
+/// How long a page read waits for a rebuild slot before 503 overloaded.
+const SHOW_READ_WAIT: Duration = Duration::from_secs(5);
 const _: () = assert!(SHOW_DETAIL_CACHE_TTL.as_secs() < crate::cache::BREAKER_COOLDOWN.as_secs());
 
 pub fn router() -> Router<AppState> {
@@ -225,7 +232,7 @@ struct SeatCounts {
 }
 
 #[derive(Serialize, Deserialize)]
-struct ShowDetail {
+pub(crate) struct ShowDetail {
     #[serde(flatten)]
     show: Show,
     counts: SeatCounts,
@@ -289,20 +296,76 @@ async fn list_shows(
     Ok(Json(ShowPage { shows, next }))
 }
 
+/// GET /shows/{id} cache misses in flight on this replica, by show.
+pub(crate) type ShowReads = SingleFlight<Uuid, Result<Arc<ShowDetail>, ShowReadError>>;
+
+/// What a shared page read can fail with; every waiter gets a copy.
+#[derive(Clone)]
+pub(crate) enum ShowReadError {
+    NotFound,
+    Overloaded,
+    Internal(Arc<str>),
+}
+
+impl From<AppError> for ShowReadError {
+    fn from(err: AppError) -> Self {
+        match err {
+            AppError::NotFound(_) => ShowReadError::NotFound,
+            AppError::Overloaded => ShowReadError::Overloaded,
+            other => ShowReadError::Internal(format!("{other:?}").into()),
+        }
+    }
+}
+
+impl From<ShowReadError> for AppError {
+    fn from(err: ShowReadError) -> Self {
+        match err {
+            ShowReadError::NotFound => AppError::NotFound("show not found"),
+            ShowReadError::Overloaded => AppError::Overloaded,
+            ShowReadError::Internal(msg) => AppError::Internal(anyhow::anyhow!("{msg}")),
+        }
+    }
+}
+
 async fn get_show(
     State(state): State<AppState>,
     PathParam(show_id): PathParam<Uuid>,
-) -> Result<Json<ShowDetail>, AppError> {
+) -> Result<Json<Arc<ShowDetail>>, AppError> {
+    if let Some(detail) = state.cache.get_json(&show_detail_key(show_id)).await {
+        return Ok(Json(Arc::new(detail)));
+    }
+    // A burst of misses for one show on this replica shares one read.
+    let reader = state.clone();
+    let detail = state
+        .show_reads
+        .run(show_id, move || refill_show_detail(reader, show_id))
+        .await?;
+    Ok(Json(detail))
+}
+
+/// Rebuild the page from Postgres and cache it, taking one of the few
+/// page-read slots so a read storm can't starve bookings of connections.
+async fn refill_show_detail(
+    state: AppState,
+    show_id: Uuid,
+) -> Result<Arc<ShowDetail>, ShowReadError> {
+    let _slot =
+        match tokio::time::timeout(SHOW_READ_WAIT, state.show_read_semaphore.acquire()).await {
+            Ok(Ok(slot)) => slot,
+            Ok(Err(closed)) => return Err(ShowReadError::Internal(closed.to_string().into())),
+            Err(_) => return Err(ShowReadError::Overloaded),
+        };
     let key = show_detail_key(show_id);
+    // Another replica may have refilled it while this one waited.
     if let Some(detail) = state.cache.get_json(&key).await {
-        return Ok(Json(detail));
+        return Ok(Arc::new(detail));
     }
     let detail = build_show_detail(&state, show_id).await?;
     state
         .cache
         .set_json(&key, &detail, SHOW_DETAIL_CACHE_TTL)
         .await;
-    Ok(Json(detail))
+    Ok(Arc::new(detail))
 }
 
 async fn build_show_detail(state: &AppState, show_id: Uuid) -> Result<ShowDetail, AppError> {
@@ -343,8 +406,8 @@ fn seat_sort_key(label: &str) -> (&str, u32, &str) {
     (row, num.parse().unwrap_or(0), label)
 }
 
-/// Cache key for the GET /shows/{id} body. Anything that changes a seat
-/// deletes it after committing.
+/// Cache key for the GET /shows/{id} body. Cancels delete it after
+/// committing; bookings let it expire (see SHOW_DETAIL_CACHE_TTL).
 pub(super) fn show_detail_key(show_id: Uuid) -> String {
     format!("show:{show_id}:detail")
 }

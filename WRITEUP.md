@@ -150,7 +150,9 @@ database is unreachable, bookings stop rather than guess:
   listening connection drops, it reloads the whole map.
 - **Cache (Dragonfly) partition:** availability over freshness, safely. The
   cache holds only reads (the show row; the `GET /shows/{id}` body for 2 s,
-  deleted on every booking/cancel commit). Calls time out after 100 ms and a
+  which may lag a booking by up to 2 s and is cleared on cancel; concurrent
+  misses for one show share one database read, capped at two at a time per
+  replica so page reads can't starve bookings of connections). Calls time out after 100 ms and a
   breaker skips the cache for 5 s after a failure. Writes never go through it,
   so losing it costs latency, not correctness.
 - **Metrics:** `/metrics` on any replica adds up its peers' counters; a peer
