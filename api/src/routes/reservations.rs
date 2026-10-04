@@ -3,11 +3,10 @@
 //! so concurrent reserves and cancels can't deadlock each other.
 
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::routing::post;
 use axum::{Json, Router};
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 use sqlx::{PgConnection, PgExecutor};
 use uuid::Uuid;
 
@@ -15,11 +14,10 @@ use super::shows::{load_show, show_detail_key};
 use crate::auth::AuthUser;
 use crate::error::{AppError, Conflict};
 use crate::extract::{JsonBody, PathParam};
+use crate::idempotency::{request_hash, IdempotencyKey};
 use crate::metrics::Decline;
 use crate::models::{Reservation, Seat, SeatStatus, Show, RESERVATION_COLUMNS};
 use crate::state::AppState;
-
-const MAX_IDEMPOTENCY_KEY_LEN: usize = 255;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -58,10 +56,10 @@ async fn reserve(
     State(state): State<AppState>,
     PathParam(show_id): PathParam<Uuid>,
     user: AuthUser,
-    headers: HeaderMap,
+    IdempotencyKey(idempotency_key): IdempotencyKey,
     JsonBody(req): JsonBody<ReserveRequest>,
 ) -> Result<(StatusCode, Json<Reservation>), AppError> {
-    let input = parse_reserve_input(show_id, &headers, req)?;
+    let input = parse_reserve_input(show_id, idempotency_key, req)?;
     let outcome = reserve_seats(&state, show_id, &user, &input).await;
     record_outcome(&state, &outcome);
     let (Reserved::Created(reservation) | Reserved::Replayed(reservation)) = outcome?;
@@ -102,21 +100,9 @@ async fn reserve_seats(
 
 fn parse_reserve_input(
     show_id: Uuid,
-    headers: &HeaderMap,
+    idempotency_key: String,
     req: ReserveRequest,
 ) -> Result<ReserveInput, AppError> {
-    let key = headers
-        .get("idempotency-key")
-        .and_then(|v| v.to_str().ok())
-        .map(str::trim)
-        .filter(|k| !k.is_empty())
-        .ok_or_else(|| AppError::Validation("Idempotency-Key header is required".into()))?;
-    if key.len() > MAX_IDEMPOTENCY_KEY_LEN {
-        return Err(AppError::Validation(format!(
-            "Idempotency-Key must be at most {MAX_IDEMPOTENCY_KEY_LEN} characters"
-        )));
-    }
-
     let mut seats = req.seats;
     let requested = seats.len();
     seats.sort();
@@ -131,8 +117,8 @@ fn parse_reserve_input(
     }
 
     Ok(ReserveInput {
-        idempotency_key: key.to_string(),
-        request_hash: request_hash(show_id, &seats),
+        idempotency_key,
+        request_hash: request_hash(&(show_id, &seats)),
         seats,
     })
 }
@@ -270,13 +256,6 @@ async fn find_by_key<'e>(
     .bind(key)
     .fetch_optional(executor)
     .await?)
-}
-
-/// Seats arrive sorted and de-duplicated, so the same request always hashes
-/// the same; JSON encoding keeps labels from running into each other.
-fn request_hash(show_id: Uuid, sorted_seats: &[String]) -> String {
-    let canonical = serde_json::to_vec(&(show_id, sorted_seats)).expect("serializable");
-    hex::encode(Sha256::digest(&canonical))
 }
 
 // ----------------------------------------------------------------- cancel

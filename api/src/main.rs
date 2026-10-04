@@ -3,6 +3,7 @@ mod cache;
 mod config;
 mod error;
 mod extract;
+mod idempotency;
 mod metrics;
 mod models;
 mod routes;

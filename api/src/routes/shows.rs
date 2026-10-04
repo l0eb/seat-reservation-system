@@ -10,8 +10,9 @@ use sqlx::PgExecutor;
 use uuid::Uuid;
 
 use crate::auth::AuthUser;
-use crate::error::AppError;
+use crate::error::{AppError, Conflict};
 use crate::extract::{JsonBody, PathParam, QueryParams};
+use crate::idempotency::{request_hash, IdempotencyKey};
 use crate::models::{Seat, SeatStatus, Show, SHOW_COLUMNS};
 use crate::state::AppState;
 
@@ -43,14 +44,25 @@ struct CreateShowRequest {
     seats_per_row: u32,
 }
 
+#[derive(sqlx::FromRow)]
+struct KeyedShow {
+    request_hash: String,
+    #[sqlx(flatten)]
+    show: Show,
+}
+
+/// A retry with the same Idempotency-Key gets the original show back (still
+/// 201) instead of a duplicate with its own seat map.
 async fn create_show(
     State(state): State<AppState>,
     user: AuthUser,
+    idempotency_key: Result<IdempotencyKey, AppError>,
     JsonBody(req): JsonBody<CreateShowRequest>,
 ) -> Result<(StatusCode, Json<Show>), AppError> {
     if !user.is_admin {
         return Err(AppError::Forbidden("admin role required"));
     }
+    let IdempotencyKey(idempotency_key) = idempotency_key?;
     let name = req.name.trim();
     let per_user_limit = req.per_user_limit.unwrap_or(DEFAULT_PER_USER_LIMIT);
     if name.is_empty() {
@@ -70,19 +82,49 @@ async fn create_show(
             "seats_per_row must be 1..={MAX_SEATS_PER_ROW}"
         )));
     }
+    let hash = request_hash(&(
+        name,
+        req.price_paise,
+        per_user_limit,
+        req.rows,
+        req.seats_per_row,
+    ));
     let labels = seat_labels(req.rows, req.seats_per_row);
 
     let mut tx = state.pool.begin().await?;
-    let show: Show = sqlx::query_as(&format!(
-        "insert into shows (name, price_paise, per_user_limit, total_seats)
-         values ($1, $2, $3, $4) returning {SHOW_COLUMNS}"
+    // A concurrent create with the same key blocks here until it commits,
+    // then lands on the conflict path and replays.
+    let inserted: Option<Show> = sqlx::query_as(&format!(
+        "insert into shows
+             (name, price_paise, per_user_limit, total_seats,
+              created_by, idempotency_key, request_hash)
+         values ($1, $2, $3, $4, $5, $6, $7)
+         on conflict (created_by, idempotency_key) do nothing
+         returning {SHOW_COLUMNS}"
     ))
     .bind(name)
     .bind(req.price_paise)
     .bind(per_user_limit)
     .bind(labels.len() as i32)
-    .fetch_one(&mut *tx)
+    .bind(&user.user_id)
+    .bind(&idempotency_key)
+    .bind(&hash)
+    .fetch_optional(&mut *tx)
     .await?;
+    let Some(show) = inserted else {
+        let existing: KeyedShow = sqlx::query_as(&format!(
+            "select request_hash, {SHOW_COLUMNS} from shows
+             where created_by = $1 and idempotency_key = $2"
+        ))
+        .bind(&user.user_id)
+        .bind(&idempotency_key)
+        .fetch_one(&mut *tx)
+        .await?;
+        if existing.request_hash != hash {
+            return Err(AppError::Conflict(Conflict::IdempotencyMismatch));
+        }
+        return Ok((StatusCode::CREATED, Json(existing.show)));
+    };
     sqlx::query("insert into seats (show_id, label) select $1, unnest($2::text[])")
         .bind(show.id)
         .bind(&labels)
