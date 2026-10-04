@@ -188,10 +188,13 @@ CPU or connections trending toward the limit.
 **Not alerts:** 409s. Thousands of `seat_taken` during an on-sale are the
 system working.
 
-Logs are structured JSON with an `x-request-id` per request (returned in the
-response), in CloudWatch with one stream per replica. Normal requests log
-nothing; 5xx and unusual events log one line, so the logs stay readable during
-a burst.
+Logs are structured JSON, one line per request (status, latency) inside a span
+carrying the `request_id` that is also returned in the `x-request-id` header,
+plus method, path and replica; so a buyer's complaint with a request id leads
+straight to the line, the replica, and anything else it logged. They go to
+CloudWatch, one stream per replica. A background writer keeps logging off the
+request path: making it synchronous had raised p99 at 5,000/s from 12 ms to
+62 ms; with the writer it is back to 14 ms.
 
 Gap I'd close first: there are no latency histograms, only counters. A p99
 booking-latency SLO is the alert I'm missing.

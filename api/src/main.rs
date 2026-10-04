@@ -14,12 +14,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::http::HeaderName;
+use axum::body::Body;
+use axum::http::{HeaderName, Request};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
-use tower_http::trace::{DefaultOnFailure, TraceLayer};
+use tower_http::trace::{DefaultOnFailure, DefaultOnResponse, TraceLayer};
+use tower_http::LatencyUnit;
 use tracing::Level;
 use tracing_subscriber::EnvFilter;
 
@@ -42,8 +44,16 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Log lines go to a background thread, so a request never waits on
+    // stdout; if it ever falls 128k lines behind, lines are dropped rather
+    // than slowing bookings. The guard flushes what's queued on exit.
+    let (log_writer, _log_guard) = tracing_appender::non_blocking(std::io::stdout());
     tracing_subscriber::fmt()
+        .with_writer(log_writer)
         .json()
+        // The current span (request id, method, path, replica) is enough;
+        // the full span list would repeat it on every line.
+        .with_span_list(false)
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
@@ -85,12 +95,40 @@ async fn main() -> anyhow::Result<()> {
     let drain_for = Duration::from_secs(state.config.shutdown_drain_secs);
 
     let request_id_header = HeaderName::from_static("x-request-id");
+    let replica = state.config.replica_id.clone();
+
+    // One JSON line per request ("finished processing request", with status
+    // and latency), inside a span that carries the request id (the same one
+    // returned in the x-request-id header), method, path and replica, so a
+    // response can be traced to its log line and every line inside it.
+    // Quieten with RUST_LOG=info,tower_http=warn.
+    let trace = TraceLayer::new_for_http()
+        .make_span_with(move |req: &Request<Body>| {
+            let request_id = req
+                .headers()
+                .get("x-request-id")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("-");
+            tracing::info_span!(
+                "request",
+                request_id,
+                method = %req.method(),
+                path = %req.uri().path(),
+                replica = %replica,
+            )
+        })
+        .on_response(
+            DefaultOnResponse::new()
+                .level(Level::INFO)
+                .latency_unit(LatencyUnit::Millis),
+        )
+        // 5xx here are mostly deliberate 503s when shedding load; real
+        // internal errors log their own ERROR line in AppError.
+        .on_failure(DefaultOnFailure::new().level(Level::WARN));
 
     let app = routes::router(state)
         .layer(PropagateRequestIdLayer::new(request_id_header.clone()))
-        // 5xx here are mostly deliberate 503s when shedding load; real
-        // internal errors log their own ERROR line in AppError.
-        .layer(TraceLayer::new_for_http().on_failure(DefaultOnFailure::new().level(Level::WARN)))
+        .layer(trace)
         .layer(SetRequestIdLayer::new(request_id_header, MakeRequestUuid));
 
     let listener = TcpListener::bind(("0.0.0.0", config.port)).await?;

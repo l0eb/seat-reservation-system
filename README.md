@@ -142,9 +142,19 @@ whose numbers are included. `GET /metrics/local` is one replica's own.
 | `seat_map_taken{show,replica}` | each replica's in-memory view; equals `seats_confirmed` at rest |
 | `cache_lookups_total{result}`, `replica_up`, `process_start_time_seconds` | |
 
-Logs are JSON, one line per event, with the `x-request-id` (also returned as a
-response header) on every request span. Normal requests log nothing at `info`;
-5xx responses and anything unusual log a line.
+Logs are JSON. Every request logs one line when it finishes, with its status
+and latency, inside a span carrying the `request_id` (the same id returned in
+the `x-request-id` response header), method, path and replica:
+
+```json
+{"timestamp":"…","level":"INFO","fields":{"message":"finished processing request","latency":"1 ms","status":409},
+ "span":{"request_id":"ebc9ac5c-…","method":"POST","path":"/shows/…/reserve","replica":"api-2","name":"request"}}
+```
+
+Anything unusual (a 5xx, a shed request, a cache or seat-map problem) logs its
+own line inside the same span. Lines are written by a background thread, so
+logging never slows a request (p99 unchanged at 5,000/s); quieten per-request
+lines with `RUST_LOG=info,tower_http=warn`.
 
 - Live: CloudWatch Logs group `/seat-reservation/api`, one stream per replica:
   `aws logs tail /seat-reservation/api --follow --region ap-south-1`
