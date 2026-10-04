@@ -1,22 +1,44 @@
 # The load balancer in front of the api replicas, shared by docker compose
-# and the deployed edge droplet. Set by the environment:
+# and the deployed edge. Set by the environment:
 #   SITE       what to serve: ":8080" locally, "<ip>.sslip.io" when deployed
 #              (a hostname makes Caddy fetch a Let's Encrypt certificate)
 #   UPSTREAMS  the replicas, space-separated host:port
 {$SITE} {
 	encode zstd gzip
-	reverse_proxy {$UPSTREAMS} {
-		# Each request goes to the replica with the fewest in flight.
-		lb_policy least_conn
-		# Active checks: a replica whose /readyz fails (it lost the database,
-		# or it is draining before a shutdown) stops getting traffic within
-		# ~2s.
-		health_uri /readyz
-		health_interval 2s
-		health_timeout 1s
-		# A replica that refuses connections is skipped; Caddy retries only
-		# requests it never managed to send, so nothing is sent twice.
-		lb_try_duration 2s
-		fail_duration 10s
+
+	# Liveness and metrics go to any replica whose process is up, ready or
+	# not: when the database is down every replica fails /readyz, and
+	# /metrics is exactly what someone paged at 2am needs to read.
+	@ops path /healthz /metrics /metrics/local
+	handle @ops {
+		reverse_proxy {$UPSTREAMS} {
+			lb_try_duration 2s
+			fail_duration 10s
+		}
+	}
+
+	# Everything else, /readyz included, only reaches ready replicas.
+	handle {
+		reverse_proxy {$UPSTREAMS} {
+			# Each request goes to the replica with the fewest in flight.
+			lb_policy least_conn
+			# Active checks: a replica whose /readyz fails (it lost the
+			# database, or it is draining before a shutdown) stops getting
+			# traffic within ~2s.
+			health_uri /readyz
+			health_interval 2s
+			health_timeout 1s
+			# A replica that refuses connections is skipped; Caddy retries
+			# only requests it never managed to send, so nothing is sent
+			# twice.
+			lb_try_duration 2s
+			fail_duration 10s
+		}
+	}
+
+	# No ready replica (or none answering): say so in JSON, like the api.
+	handle_errors {
+		header Content-Type application/json
+		respond `{"error":"no_replica_ready"}` {err.status_code}
 	}
 }
