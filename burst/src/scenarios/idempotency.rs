@@ -56,7 +56,7 @@ pub async fn run(ctx: &mut Ctx, users: usize, copies: usize) -> Result<Totals> {
 
     let mut ids_per_user: Vec<HashSet<&str>> = vec![HashSet::new(); users];
     for (i, reply) in &parallel {
-        if let Some(id) = reply.id() {
+        if let Some(id) = reply.reservation_id() {
             ids_per_user[*i].insert(id);
         }
     }
@@ -83,8 +83,9 @@ pub async fn run(ctx: &mut Ctx, users: usize, copies: usize) -> Result<Totals> {
             t_mismatch.count("409 idempotency_mismatch")
         ),
     );
-    let same_again = (0..users)
-        .all(|i| again[i].is(201) && ids_per_user[i].contains(again[i].id().unwrap_or("")));
+    let same_again = (0..users).all(|i| {
+        again[i].is(201) && ids_per_user[i].contains(again[i].reservation_id().unwrap_or(""))
+    });
     r.check(
         NAME,
         "a later retry still returns the original",
@@ -120,7 +121,7 @@ pub async fn run(ctx: &mut Ctx, users: usize, copies: usize) -> Result<Totals> {
     let show_ids: HashSet<&str> = creates
         .iter()
         .filter(|r| r.is(201))
-        .filter_map(|r| r.id())
+        .filter_map(|r| r.show_id())
         .collect();
     r.check(
         NAME,

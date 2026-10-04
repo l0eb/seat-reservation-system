@@ -166,8 +166,11 @@ pub struct ShowSeatCounts {
     pub confirmed: i64,
 }
 
+/// A per-show gauge: metric name, help text, and how to read it.
+type SeatGauge = (&'static str, &'static str, fn(&ShowSeatCounts) -> i64);
+
 pub fn render_seat_gauges(out: &mut String, shows: &[ShowSeatCounts]) {
-    let gauges: [(&str, &str, fn(&ShowSeatCounts) -> i64); 3] = [
+    let gauges: [SeatGauge; 3] = [
         ("seats_available", "Seats available, per show.", |s| {
             s.available
         }),

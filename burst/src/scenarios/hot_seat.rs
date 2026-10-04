@@ -60,9 +60,9 @@ pub async fn run(ctx: &mut Ctx, buyers: usize) -> Result<Totals> {
         first_tally.count("409 seat_taken") == buyers as u64 - 1,
         format!("{} of {}", first_tally.count("409 seat_taken"), buyers - 1),
     );
-    let replayed = winners
-        .first()
-        .is_some_and(|&w| retry[w].is(201) && retry[w].id() == first[w].id());
+    let replayed = winners.first().is_some_and(|&w| {
+        retry[w].is(201) && retry[w].reservation_id() == first[w].reservation_id()
+    });
     r.check(
         NAME,
         "the winner's retry returns the same reservation",
@@ -95,7 +95,7 @@ pub async fn run(ctx: &mut Ctx, buyers: usize) -> Result<Totals> {
         .iter()
         .chain(&retry)
         .filter(|r| r.is(201))
-        .filter_map(|r| r.id())
+        .filter_map(|r| r.reservation_id())
         .collect();
     let ok = first_tally.count("201") + retry_tally.count("201");
     let mut totals = Totals {

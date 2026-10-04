@@ -22,7 +22,7 @@ use super::shows::{load_show, show_detail_key};
 use crate::auth::AuthUser;
 use crate::error::{AppError, Conflict};
 use crate::extract::{JsonBody, PathParam};
-use crate::idempotency::{request_hash, IdempotencyKey};
+use crate::idempotency::{request_hash, required_key, IdempotencyKey};
 use crate::metrics::{Decline, ReservePath};
 use crate::models::{Reservation, Seat, SeatStatus, Show, RESERVATION_COLUMNS};
 use crate::seat_map::{Gate, SeatChange};
@@ -39,6 +39,9 @@ pub fn router() -> Router<AppState> {
 #[derive(Deserialize)]
 struct ReserveRequest {
     seats: Vec<String>,
+    /// Alternative to the Idempotency-Key header.
+    #[serde(default)]
+    idempotency_key: Option<String>,
 }
 
 /// A reserve request that passed its input checks.
@@ -65,10 +68,10 @@ async fn reserve(
     State(state): State<AppState>,
     PathParam(show_id): PathParam<Uuid>,
     user: AuthUser,
-    IdempotencyKey(idempotency_key): IdempotencyKey,
+    IdempotencyKey(header_key): IdempotencyKey,
     JsonBody(req): JsonBody<ReserveRequest>,
 ) -> Result<(StatusCode, Json<Reservation>), AppError> {
-    let input = parse_reserve_input(show_id, idempotency_key, req)?;
+    let input = parse_reserve_input(show_id, header_key, req)?;
     let outcome = reserve_seats(&state, show_id, &user, &input).await;
     record_outcome(&state, &outcome);
     let (Reserved::Created(reservation) | Reserved::Replayed(reservation)) = outcome?;
@@ -187,9 +190,10 @@ fn unknown_seats(labels: &[impl AsRef<str>]) -> AppError {
 
 fn parse_reserve_input(
     show_id: Uuid,
-    idempotency_key: String,
+    header_key: Option<String>,
     req: ReserveRequest,
 ) -> Result<ReserveInput, AppError> {
+    let idempotency_key = required_key(header_key, req.idempotency_key.as_deref())?;
     let mut seats = req.seats;
     let requested = seats.len();
     seats.sort();

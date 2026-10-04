@@ -31,6 +31,7 @@ pub struct Seat {
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Reservation {
+    #[serde(rename = "reservation_id")]
     pub id: Uuid,
     pub show_id: Uuid,
     pub user_id: String,

@@ -43,7 +43,13 @@ impl Reply {
         self.is(409) && self.body["error"] == reason
     }
 
-    pub fn id(&self) -> Option<&str> {
+    /// The reservation in a reserve or cancel response.
+    pub fn reservation_id(&self) -> Option<&str> {
+        self.body["reservation_id"].as_str()
+    }
+
+    /// The show in a create-show response.
+    pub fn show_id(&self) -> Option<&str> {
         self.body["id"].as_str()
     }
 }
@@ -124,11 +130,11 @@ impl Api {
     }
 
     pub async fn create_show(&self, admin: &str, spec: &ShowSpec, key: &str) -> Reply {
+        // The brief's shape: every seat listed out.
         let body = json!({
             "name": spec.name,
+            "seats": spec.labels(),
             "price_paise": 100,
-            "rows": spec.rows,
-            "seats_per_row": spec.seats_per_row,
             "per_user_limit": spec.per_user_limit,
         });
         let request = self
@@ -145,7 +151,7 @@ impl Api {
         let reply = self
             .create_show(admin, spec, &uuid::Uuid::new_v4().to_string())
             .await;
-        match reply.id() {
+        match reply.show_id() {
             Some(id) if reply.is(201) => Ok(id.to_string()),
             _ => bail!("POST /shows -> {}", reply.label()),
         }
@@ -156,8 +162,7 @@ impl Api {
             .client
             .post(self.url(&format!("/shows/{show}/reserve")))
             .bearer_auth(token)
-            .header("idempotency-key", key)
-            .json(&json!({ "seats": seats }));
+            .json(&json!({ "seats": seats, "idempotency_key": key }));
         self.send(request).await
     }
 
@@ -201,6 +206,18 @@ pub struct ShowSpec {
     pub rows: u32,
     pub seats_per_row: u32,
     pub per_user_limit: u32,
+}
+
+impl ShowSpec {
+    /// A1..A{seats_per_row}, B1.., one letter per row.
+    pub fn labels(&self) -> Vec<String> {
+        (0..self.rows)
+            .flat_map(|r| {
+                let row = (b'A' + r as u8) as char;
+                (1..=self.seats_per_row).map(move |n| format!("{row}{n}"))
+            })
+            .collect()
+    }
 }
 
 /// GET /shows/{id}, reduced to what the checks compare.

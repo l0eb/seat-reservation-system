@@ -93,7 +93,7 @@ pub async fn run(ctx: &mut Ctx, opts: &Options) -> Result<Totals> {
             let reply = api
                 .reserve(token, &show, &planned.seats, &planned.key)
                 .await;
-            let cancel = match reply.id() {
+            let cancel = match reply.reservation_id() {
                 Some(id) if planned.cancel && reply.is(201) => Some(api.cancel(token, id).await),
                 _ => None,
             };
@@ -141,7 +141,7 @@ pub async fn run(ctx: &mut Ctx, opts: &Options) -> Result<Totals> {
     let mut cancelled: HashSet<&str> = HashSet::new();
     let mut unsure: Vec<&[String]> = Vec::new(); // may or may not hold these seats
     for o in &outcomes {
-        match (o.reply.status, o.reply.id()) {
+        match (o.reply.status, o.reply.reservation_id()) {
             (Some(201), Some(id)) => {
                 by_key.entry(&o.plan.key).or_default().insert(id);
                 reservations.insert(id, (o.plan.user, &o.plan.seats));
@@ -149,7 +149,7 @@ pub async fn run(ctx: &mut Ctx, opts: &Options) -> Result<Totals> {
             (None, _) => unsure.push(&o.plan.seats),
             _ => {}
         }
-        if let (Some(c), Some(id)) = (&o.cancel, o.reply.id()) {
+        if let (Some(c), Some(id)) = (&o.cancel, o.reply.reservation_id()) {
             match c.status {
                 Some(200) => {
                     cancelled.insert(id);
