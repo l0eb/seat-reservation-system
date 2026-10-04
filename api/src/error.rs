@@ -1,5 +1,5 @@
 use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
-use axum::http::StatusCode;
+use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::json;
@@ -33,6 +33,8 @@ pub enum AppError {
     Validation(String),
     /// The request couldn't be parsed; keeps the status axum chose.
     Rejected(StatusCode, String),
+    /// Nothing was written; safe to retry with the same Idempotency-Key.
+    Overloaded,
     Internal(anyhow::Error),
 }
 
@@ -45,6 +47,15 @@ impl IntoResponse for AppError {
             AppError::Conflict(reason) => (StatusCode::CONFLICT, reason.as_str().to_string()),
             AppError::Validation(msg) => (StatusCode::UNPROCESSABLE_ENTITY, msg),
             AppError::Rejected(status, msg) => (status, msg),
+            AppError::Overloaded => {
+                let body = Json(json!({ "error": "overloaded" }));
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    [(header::RETRY_AFTER, "1")],
+                    body,
+                )
+                    .into_response();
+            }
             AppError::Internal(err) => {
                 tracing::error!(error = %err, "internal error");
                 (
@@ -65,6 +76,16 @@ impl From<anyhow::Error> for AppError {
 
 impl From<sqlx::Error> for AppError {
     fn from(err: sqlx::Error) -> Self {
+        // Both mean the database is too busy right now, not that the request
+        // is wrong: answer 503 so the client retries.
+        let statement_timeout = err
+            .as_database_error()
+            .and_then(|e| e.code())
+            .is_some_and(|code| code == "57014");
+        if matches!(err, sqlx::Error::PoolTimedOut) || statement_timeout {
+            tracing::warn!(error = %err, "database overloaded");
+            return AppError::Overloaded;
+        }
         AppError::Internal(err.into())
     }
 }

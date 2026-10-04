@@ -6,6 +6,7 @@ use tokio::sync::Semaphore;
 use crate::cache::Cache;
 use crate::config::Config;
 use crate::metrics::Metrics;
+use crate::seat_map::SeatMap;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -13,8 +14,9 @@ pub struct AppState {
     pub cache: Cache,
     pub config: Arc<Config>,
     pub metrics: Arc<Metrics>,
-    /// Bounds how many requests enter the reserve handler at once, ahead of
-    /// the DB pool itself, so a hot-seat storm degrades to queued latency
-    /// instead of exhausting connections for unrelated requests.
+    pub seat_map: Arc<SeatMap>,
+    /// Bounds how many reserve requests use the database at once. Sized
+    /// below the pool so reads, /readyz and /metrics always find a
+    /// connection; waiters are served in arrival order.
     pub reserve_semaphore: Arc<Semaphore>,
 }

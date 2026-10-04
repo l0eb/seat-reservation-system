@@ -11,6 +11,8 @@ pub struct Config {
     pub db_pool_max_connections: u32,
     pub db_acquire_timeout_secs: u64,
     pub reserve_semaphore_permits: usize,
+    pub reserve_queue_timeout_secs: u64,
+    pub db_statement_timeout_secs: u64,
     pub auth_token_route_enabled: bool,
 }
 
@@ -22,8 +24,10 @@ impl Config {
             jwt_secret: env::var("JWT_SECRET").context("JWT_SECRET must be set")?,
             port: parse_env("PORT", 8080)?,
             db_pool_max_connections: parse_env("DB_POOL_MAX_CONNECTIONS", 30)?,
-            db_acquire_timeout_secs: parse_env("DB_ACQUIRE_TIMEOUT_SECS", 30)?,
-            reserve_semaphore_permits: parse_env("RESERVE_SEMAPHORE_PERMITS", 60)?,
+            db_acquire_timeout_secs: parse_env("DB_ACQUIRE_TIMEOUT_SECS", 5)?,
+            reserve_semaphore_permits: parse_env("RESERVE_SEMAPHORE_PERMITS", 24)?,
+            reserve_queue_timeout_secs: parse_env("RESERVE_QUEUE_TIMEOUT_SECS", 15)?,
+            db_statement_timeout_secs: parse_env("DB_STATEMENT_TIMEOUT_SECS", 5)?,
             auth_token_route_enabled: env::var("AUTH_TOKEN_ROUTE_ENABLED")
                 .map(|v| v == "true")
                 .unwrap_or(false),

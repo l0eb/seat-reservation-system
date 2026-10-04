@@ -131,6 +131,7 @@ async fn create_show(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
+    state.seat_map.add_show(show.id, &labels);
 
     Ok((StatusCode::CREATED, Json(show)))
 }

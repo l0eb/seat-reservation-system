@@ -38,12 +38,26 @@ impl Decline {
 
 pub const CACHE_RESULTS: [&str; 4] = ["hit", "miss", "error", "bypassed"];
 
+/// Where a reserve request was answered: the in-memory seat map declined it,
+/// or it went to Postgres.
+#[derive(Debug, Clone, Copy)]
+pub enum ReservePath {
+    Memory,
+    Database,
+}
+
+const RESERVE_PATHS: [&str; 2] = ["memory", "database"];
+const RETRY_RESULTS: [&str; 2] = ["recovered", "failed"];
+
 /// In-process counters. Exact only because the service runs as a single
 /// instance; seat gauges are read from the database at scrape time instead.
 pub struct Metrics {
     reservations_confirmed: AtomicU64,
     reservations_declined: [AtomicU64; Decline::ALL.len()],
     cache_lookups: [AtomicU64; CACHE_RESULTS.len()],
+    reserve_paths: [AtomicU64; RESERVE_PATHS.len()],
+    reserve_shed: AtomicU64,
+    reserve_retries: [AtomicU64; RETRY_RESULTS.len()],
     /// Indexed by HTTP status code.
     http_requests: Vec<AtomicU64>,
 }
@@ -54,6 +68,9 @@ impl Metrics {
             reservations_confirmed: AtomicU64::new(0),
             reservations_declined: Default::default(),
             cache_lookups: Default::default(),
+            reserve_paths: Default::default(),
+            reserve_shed: AtomicU64::new(0),
+            reserve_retries: Default::default(),
             http_requests: (0..600).map(|_| AtomicU64::new(0)).collect(),
         }
     }
@@ -70,6 +87,18 @@ impl Metrics {
         if let Some(i) = CACHE_RESULTS.iter().position(|r| *r == result) {
             self.cache_lookups[i].fetch_add(1, Relaxed);
         }
+    }
+
+    pub fn record_reserve_path(&self, path: ReservePath) {
+        self.reserve_paths[path as usize].fetch_add(1, Relaxed);
+    }
+
+    pub fn record_shed(&self) {
+        self.reserve_shed.fetch_add(1, Relaxed);
+    }
+
+    pub fn record_retry(&self, recovered: bool) {
+        self.reserve_retries[usize::from(!recovered)].fetch_add(1, Relaxed);
     }
 
     fn record_http_status(&self, status: u16) {
@@ -97,6 +126,25 @@ impl Metrics {
         for (result, counter) in CACHE_RESULTS.iter().zip(&self.cache_lookups) {
             let n = counter.load(Relaxed);
             let _ = writeln!(out, "cache_lookups_total{{result=\"{result}\"}} {n}");
+        }
+
+        out.push_str("# HELP reserve_requests_total Reserve requests that got past input checks, by where they were answered.\n");
+        out.push_str("# TYPE reserve_requests_total counter\n");
+        for (path, counter) in RESERVE_PATHS.iter().zip(&self.reserve_paths) {
+            let n = counter.load(Relaxed);
+            let _ = writeln!(out, "reserve_requests_total{{path=\"{path}\"}} {n}");
+        }
+
+        out.push_str("# HELP reserve_shed_total Reserve requests turned away with 503 after waiting too long for a database slot.\n");
+        out.push_str("# TYPE reserve_shed_total counter\n");
+        let shed = self.reserve_shed.load(Relaxed);
+        let _ = writeln!(out, "reserve_shed_total {shed}");
+
+        out.push_str("# HELP reserve_retries_total Booking transactions retried after a serialization failure or deadlock, by outcome.\n");
+        out.push_str("# TYPE reserve_retries_total counter\n");
+        for (result, counter) in RETRY_RESULTS.iter().zip(&self.reserve_retries) {
+            let n = counter.load(Relaxed);
+            let _ = writeln!(out, "reserve_retries_total{{result=\"{result}\"}} {n}");
         }
 
         out.push_str("# HELP http_requests_total HTTP responses, by status code.\n");
@@ -134,6 +182,21 @@ pub fn render_seat_gauges(out: &mut String, shows: &[ShowSeatCounts]) {
         for show in shows {
             let _ = writeln!(out, "{name}{{show=\"{}\"}} {}", show.show_id, value(show));
         }
+    }
+}
+
+pub fn render_reserve_inflight(out: &mut String, inflight: usize) {
+    out.push_str("# HELP reserve_inflight Reserve requests using the database right now.\n");
+    out.push_str("# TYPE reserve_inflight gauge\n");
+    let _ = writeln!(out, "reserve_inflight {inflight}");
+}
+
+/// Must equal seats_confirmed for each show whenever no booking is mid-flight.
+pub fn render_seat_map(out: &mut String, taken: &[(Uuid, i64)]) {
+    out.push_str("# HELP seat_map_taken Seats the in-memory seat map holds as taken, per show.\n");
+    out.push_str("# TYPE seat_map_taken gauge\n");
+    for (show, n) in taken {
+        let _ = writeln!(out, "seat_map_taken{{show=\"{show}\"}} {n}");
     }
 }
 

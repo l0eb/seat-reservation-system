@@ -1,6 +1,14 @@
 //! Booking and cancelling seats. Every flow here takes row locks in the same
 //! order — idempotency key, then the user's counter, then seats by label —
 //! so concurrent reserves and cancels can't deadlock each other.
+//!
+//! No double booking rests on Postgres alone: a seat is one row with one
+//! reservation_id, a booking claims only rows still 'available', and it
+//! rolls back unless it claimed every seat it asked for. The in-memory seat
+//! map in front of it can only decline, never grant.
+
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -15,8 +23,9 @@ use crate::auth::AuthUser;
 use crate::error::{AppError, Conflict};
 use crate::extract::{JsonBody, PathParam};
 use crate::idempotency::{request_hash, IdempotencyKey};
-use crate::metrics::Decline;
+use crate::metrics::{Decline, ReservePath};
 use crate::models::{Reservation, Seat, SeatStatus, Show, RESERVATION_COLUMNS};
+use crate::seat_map::{Gate, SeatChange};
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
@@ -74,6 +83,21 @@ async fn reserve_seats(
 ) -> Result<Reserved, AppError> {
     let show = load_show(state, show_id).await?;
 
+    // Most of a burst asks for seats that are already gone; answer those
+    // without the database.
+    match state
+        .seat_map
+        .check(show_id, &user.user_id, &input.seats, show.per_user_limit)
+    {
+        Gate::UnknownSeats(unknown) => return Err(unknown_seats(&unknown)),
+        Gate::Decline(conflict) => {
+            state.metrics.record_reserve_path(ReservePath::Memory);
+            return Err(AppError::Conflict(conflict));
+        }
+        Gate::Database => state.metrics.record_reserve_path(ReservePath::Database),
+    }
+    let _slot = database_slot(state).await?;
+
     // A retry of a request that already succeeded must replay, not hit the
     // pre-check below (its seats are now confirmed — by this user).
     if let Some(existing) = find_by_key(&state.pool, &user.user_id, &input.idempotency_key).await? {
@@ -95,7 +119,70 @@ async fn reserve_seats(
         }
         return Err(err);
     }
-    claim_seats(state, &show, user, input).await
+    claim_with_retry(state, &show, user, input).await
+}
+
+/// Waits for one of the reserve permits, in arrival order. Past the queue
+/// timeout the request gets 503 rather than an internal error: nothing was
+/// written, and a retry with the same key is safe.
+async fn database_slot(state: &AppState) -> Result<tokio::sync::SemaphorePermit<'_>, AppError> {
+    let wait = Duration::from_secs(state.config.reserve_queue_timeout_secs);
+    match tokio::time::timeout(wait, state.reserve_semaphore.acquire()).await {
+        Ok(Ok(permit)) => Ok(permit),
+        Ok(Err(closed)) => Err(anyhow::Error::from(closed).into()),
+        Err(_) => {
+            state.metrics.record_shed();
+            Err(AppError::Overloaded)
+        }
+    }
+}
+
+/// Neither error should happen at READ COMMITTED with a fixed lock order,
+/// but if one does, the transaction rolled back whole and can rerun once.
+async fn claim_with_retry(
+    state: &AppState,
+    show: &Show,
+    user: &AuthUser,
+    input: &ReserveInput,
+) -> Result<Reserved, AppError> {
+    match claim_seats(state, show, user, input).await {
+        Err(err) if is_transient(&err) => {
+            tracing::warn!(error = ?err, "booking transaction conflict, retrying once");
+            tokio::time::sleep(retry_jitter()).await;
+            let second = claim_seats(state, show, user, input).await;
+            let failed = matches!(&second, Err(err) if is_transient(err));
+            state.metrics.record_retry(!failed);
+            if failed {
+                return Err(AppError::Overloaded);
+            }
+            second
+        }
+        other => other,
+    }
+}
+
+/// Serialization failure or deadlock.
+fn is_transient(err: &AppError) -> bool {
+    let AppError::Internal(err) = err else {
+        return false;
+    };
+    err.downcast_ref::<sqlx::Error>()
+        .and_then(|err| err.as_database_error())
+        .and_then(|err| err.code())
+        .is_some_and(|code| matches!(code.as_ref(), "40001" | "40P01"))
+}
+
+/// 5-20ms, so two requests that collided don't collide again.
+fn retry_jitter() -> Duration {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    Duration::from_millis(5 + u64::from(nanos % 16))
+}
+
+fn unknown_seats(labels: &[impl AsRef<str>]) -> AppError {
+    let labels: Vec<&str> = labels.iter().map(AsRef::as_ref).collect();
+    AppError::Validation(format!("unknown seats: {}", labels.join(", ")))
 }
 
 fn parse_reserve_input(
@@ -133,15 +220,11 @@ async fn precheck_seats(state: &AppState, show_id: Uuid, seats: &[String]) -> Re
             .fetch_all(&state.pool)
             .await?;
     if found.len() != seats.len() {
-        let unknown: Vec<&str> = seats
+        let unknown: Vec<&String> = seats
             .iter()
             .filter(|s| !found.iter().any(|f| &f.label == *s))
-            .map(String::as_str)
             .collect();
-        return Err(AppError::Validation(format!(
-            "unknown seats: {}",
-            unknown.join(", ")
-        )));
+        return Err(unknown_seats(&unknown));
     }
     if found.iter().any(|s| s.status != SeatStatus::Available) {
         return Err(AppError::Conflict(Conflict::SeatTaken));
@@ -201,21 +284,34 @@ async fn claim_seats(
     }
 
     lock_seats(&mut tx, show.id, &input.seats).await?;
-    let claimed = sqlx::query(
-        "update seats set status = 'confirmed', reservation_id = $3
-         where show_id = $1 and label = any($2) and status = 'available'",
+    let claimed: Vec<(String, i64)> = sqlx::query_as(
+        "update seats set status = 'confirmed', reservation_id = $3, version = version + 1
+         where show_id = $1 and label = any($2) and status = 'available'
+         returning label, version",
     )
     .bind(show.id)
     .bind(&input.seats)
     .bind(reservation.id)
-    .execute(&mut *tx)
-    .await?
-    .rows_affected();
-    if claimed != input.seats.len() as u64 {
+    .fetch_all(&mut *tx)
+    .await?;
+    // All or nothing: dropping the transaction rolls back the partial claim.
+    if claimed.len() != input.seats.len() {
         return Err(AppError::Conflict(Conflict::SeatTaken));
     }
 
     tx.commit().await?;
+    // After commit, so the map never shows a seat taken that isn't.
+    state.seat_map.add_user(&user.user_id);
+    let owner: Arc<str> = Arc::from(user.user_id.as_str());
+    let changes = claimed
+        .into_iter()
+        .map(|(label, version)| SeatChange {
+            label,
+            owner: Some(owner.clone()),
+            version,
+        })
+        .collect();
+    state.seat_map.apply(show.id, changes);
     state.cache.delete(&show_detail_key(show.id)).await;
     Ok(Reserved::Created(reservation))
 }
@@ -304,16 +400,28 @@ async fn cancel(
     lock_seats(&mut tx, reservation.show_id, &reservation.seats).await?;
     // Matching on reservation_id means a cancel can never free a seat that
     // now belongs to someone else.
-    sqlx::query(
-        "update seats set status = 'available', reservation_id = null
-         where show_id = $1 and label = any($2) and reservation_id = $3",
+    let freed: Vec<(String, i64)> = sqlx::query_as(
+        "update seats set status = 'available', reservation_id = null, version = version + 1
+         where show_id = $1 and label = any($2) and reservation_id = $3
+         returning label, version",
     )
     .bind(reservation.show_id)
     .bind(&reservation.seats)
     .bind(reservation.id)
-    .execute(&mut *tx)
+    .fetch_all(&mut *tx)
     .await?;
 
+    // Before commit, so the map never shows a seat taken that isn't. If the
+    // commit fails, the seats only look free: Postgres still declines them.
+    let changes = freed
+        .into_iter()
+        .map(|(label, version)| SeatChange {
+            label,
+            owner: None,
+            version,
+        })
+        .collect();
+    state.seat_map.apply(reservation.show_id, changes);
     tx.commit().await?;
     state
         .cache

@@ -9,7 +9,9 @@ use axum::{Json, Router};
 use serde_json::{json, Value};
 use tokio::time::timeout;
 
-use crate::metrics::{render_seat_gauges, ShowSeatCounts};
+use crate::metrics::{
+    render_reserve_inflight, render_seat_gauges, render_seat_map, ShowSeatCounts,
+};
 use crate::state::AppState;
 
 const READY_TIMEOUT: Duration = Duration::from_secs(1);
@@ -44,6 +46,12 @@ async fn readyz(State(state): State<AppState>) -> (StatusCode, Json<Value>) {
 async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
     let mut body = String::new();
     state.metrics.render(&mut body);
+    let permits = state.config.reserve_semaphore_permits;
+    render_reserve_inflight(
+        &mut body,
+        permits - state.reserve_semaphore.available_permits(),
+    );
+    render_seat_map(&mut body, &state.seat_map.taken_counts());
 
     // One statement reads one snapshot, so each show's gauges sum to its
     // total_seats. If the database is slow or down, still serve the counters.
