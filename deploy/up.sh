@@ -101,6 +101,15 @@ if ! aws iam get-role --role-name "$ROLE" >/dev/null 2>&1; then
   sleep 10 # instance profiles take a moment to become usable by EC2
 fi
 
+# Grafana on the edge reads logs and metrics with the instance role: read
+# only, and logs only from this project's log group. Re-applied every run.
+aws iam put-role-policy --role-name "$ROLE" --policy-name observability-read --policy-document "{
+  \"Version\":\"2012-10-17\",\"Statement\":[
+    {\"Effect\":\"Allow\",\"Action\":[\"logs:StartQuery\",\"logs:GetLogEvents\",\"logs:FilterLogEvents\",\"logs:GetLogGroupFields\"],
+     \"Resource\":\"arn:aws:logs:$REGION:$ACCOUNT:log-group:$LOG_GROUP:*\"},
+    {\"Effect\":\"Allow\",\"Action\":[\"logs:DescribeLogGroups\",\"logs:GetQueryResults\",\"logs:StopQuery\",
+       \"cloudwatch:GetMetricData\",\"cloudwatch:ListMetrics\",\"ec2:DescribeRegions\"],\"Resource\":\"*\"}]}"
+
 # --- logs, secrets ---------------------------------------------------------------
 if ! aws logs describe-log-groups --region "$REGION" --log-group-name-prefix "$LOG_GROUP" --query 'logGroups[0].logGroupName' --output text | grep -qx "$LOG_GROUP"; then
   aws logs create-log-group --region "$REGION" --log-group-name "$LOG_GROUP" --tags Project=$PROJECT

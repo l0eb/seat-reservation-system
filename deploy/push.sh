@@ -50,13 +50,27 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
 if [ $EDGE = 1 ]; then
-  log "edge: https://$SITE -> ${PRIVATES[*]}"
+  log "edge: https://$SITE -> ${PRIVATES[*]}, Grafana at /grafana"
   cat > "$TMP/edge.env" <<EOF
 PRIVATE_IP=$EDGE_PRIVATE
 SITE=$SITE
 UPSTREAMS="$(printf '%s:8080 ' "${PRIVATES[@]}" | sed 's/ $//')"
+REGION=$REGION
+PARAMS=$PARAMS
 EOF
-  run_on "$EDGE_ID" edge.sh host.env="$TMP/edge.env" Caddyfile=caddy/Caddyfile edge.sh=deploy/host/edge.sh
+  # Prometheus scrapes each replica at its private address.
+  for line in "${APIS[@]}"; do
+    read -r _ private _ name <<<"$line"
+    printf '{"targets":["%s:8080"],"labels":{"replica":"%s"}}\n' "$private" "${name#"$PROJECT-"}"
+  done | python3 -c 'import sys, json; print(json.dumps([json.loads(l) for l in sys.stdin]))' > "$TMP/targets.json"
+  tar -czf "$TMP/observability.tgz" -C observability .
+  # Grafana's admin password: made once, kept in Parameter Store.
+  if ! aws ssm get-parameter --region "$REGION" --name "$PARAMS/grafana-admin-password" >/dev/null 2>&1; then
+    aws ssm put-parameter --region "$REGION" --name "$PARAMS/grafana-admin-password" --type SecureString \
+      --value "$(openssl rand -hex 16)" --tags "$TAG_SPEC" >/dev/null
+  fi
+  run_on "$EDGE_ID" edge.sh host.env="$TMP/edge.env" Caddyfile=caddy/Caddyfile edge.sh=deploy/host/edge.sh \
+    observability.tgz="$TMP/observability.tgz" targets.json="$TMP/targets.json"
 fi
 
 for line in "${APIS[@]}"; do

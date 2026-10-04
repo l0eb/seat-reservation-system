@@ -1,0 +1,10 @@
+# Deployed only: the replicas' logs (and EC2/RDS metrics) in CloudWatch. No
+# keys: Grafana uses the edge instance's IAM role, which may only read.
+apiVersion: 1
+datasources:
+  - name: CloudWatch
+    uid: cloudwatch
+    type: cloudwatch
+    jsonData:
+      authType: default
+      defaultRegion: ap-south-1

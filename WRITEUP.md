@@ -196,6 +196,11 @@ CloudWatch, one stream per replica. A background writer keeps logging off the
 request path: making it synchronous had raised p99 at 5,000/s from 12 ms to
 62 ms; with the writer it is back to 14 ms.
 
+Everything above is visible at `/grafana` on the live URL, read-only and
+without a login: Prometheus scrapes every replica every 5 s for the metrics
+dashboard, and a second dashboard queries the CloudWatch logs (including a
+search by request id) and EC2/RDS CPU through a read-only IAM role.
+
 Gap I'd close first: there are no latency histograms, only counters. A p99
 booking-latency SLO is the alert I'm missing.
 

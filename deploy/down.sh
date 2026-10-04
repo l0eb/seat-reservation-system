@@ -36,6 +36,7 @@ if aws iam get-role --role-name "$ROLE" >/dev/null 2>&1; then
   aws iam remove-role-from-instance-profile --instance-profile-name "$ROLE" --role-name "$ROLE" 2>/dev/null
   aws iam delete-instance-profile --instance-profile-name "$ROLE" 2>/dev/null
   aws iam delete-role-policy --role-name "$ROLE" --policy-name app 2>/dev/null
+  aws iam delete-role-policy --role-name "$ROLE" --policy-name observability-read 2>/dev/null
   for arn in $(aws iam list-attached-role-policies --role-name "$ROLE" --query 'AttachedPolicies[].PolicyArn' --output text); do
     aws iam detach-role-policy --role-name "$ROLE" --policy-arn "$arn"
   done
@@ -45,7 +46,7 @@ fi
 log "deleting ECR repo, log group, SSM parameters"
 aws ecr delete-repository --region "$REGION" --repository-name "$REPO" --force >/dev/null 2>&1
 aws logs delete-log-group --region "$REGION" --log-group-name "$LOG_GROUP" 2>/dev/null
-for p in db-password jwt-secret database-url; do
+for p in db-password jwt-secret database-url grafana-admin-password; do
   aws ssm delete-parameter --region "$REGION" --name "$PARAMS/$p" 2>/dev/null
 done
 

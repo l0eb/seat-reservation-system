@@ -1,0 +1,27 @@
+# Prometheus for the seat-reservation replicas. The targets come from
+# targets.json: api-1..3 in docker compose, their private IPs when deployed
+# (written by deploy/push.sh --edge).
+global:
+  scrape_interval: 5s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # Each replica's own counters and gauges. Prometheus keeps them apart by
+  # replica, and dashboards sum across replicas themselves.
+  - job_name: api
+    metrics_path: /metrics/local
+    file_sd_configs:
+      - files: [/etc/prometheus/targets.json]
+
+  # The seat gauges are read from the database by /metrics, not
+  # /metrics/local. Keep only those; every replica reports the same values,
+  # so dashboards take max() over them.
+  - job_name: api-seats
+    metrics_path: /metrics
+    scrape_interval: 15s
+    file_sd_configs:
+      - files: [/etc/prometheus/targets.json]
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: seats_(available|held|confirmed)
+        action: keep

@@ -1,0 +1,11 @@
+# Grafana's link to Prometheus: same Docker network, never exposed publicly.
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    jsonData:
+      timeInterval: 5s

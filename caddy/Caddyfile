@@ -6,6 +6,12 @@
 {$SITE} {
 	encode zstd gzip
 
+	# Grafana: dashboards over Prometheus and (deployed) CloudWatch logs.
+	# Read-only for anonymous visitors.
+	handle /grafana* {
+		reverse_proxy {$GRAFANA_UPSTREAM:grafana:3000}
+	}
+
 	# Liveness and metrics go to any replica whose process is up, ready or
 	# not: when the database is down every replica fails /readyz, and
 	# /metrics is exactly what someone paged at 2am needs to read.

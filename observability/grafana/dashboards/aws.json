@@ -1,0 +1,348 @@
+{
+  "uid": "seat-logs",
+  "title": "Seat Reservation — Logs & infrastructure",
+  "description": "Per-request logs from CloudWatch (one stream per replica) and EC2/RDS metrics.",
+  "tags": [
+    "seat-reservation"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "editable": false,
+  "graphTooltip": 1,
+  "templating": {
+    "list": [
+      {
+        "type": "textbox",
+        "name": "request_id",
+        "label": "request_id",
+        "query": "",
+        "current": {
+          "value": "",
+          "text": ""
+        },
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "table",
+      "title": "Recent requests",
+      "description": "One line per request (health checks hidden), newest first. request_id is the x-request-id the client received.",
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 10
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "refId": "A",
+          "queryMode": "Logs",
+          "region": "default",
+          "id": "",
+          "expression": "fields @timestamp, span.replica as replica, span.request_id as request_id, span.method as method, span.path as path, fields.status as status, fields.latency as latency\n| filter fields.message = \"finished processing request\" and span.path != \"/readyz\"\n| sort @timestamp desc\n| limit 200",
+          "logGroupNames": [
+            "/seat-reservation/api"
+          ],
+          "statsGroups": []
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "table",
+      "title": "Find a request by id",
+      "description": "Type an x-request-id into the request_id box at the top: every line logged inside that request.",
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 10,
+        "w": 24,
+        "h": 5
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "refId": "A",
+          "queryMode": "Logs",
+          "region": "default",
+          "id": "",
+          "expression": "fields @timestamp, span.replica as replica, span.method as method, span.path as path, fields.status as status, fields.latency as latency, fields.message as message\n| filter span.request_id = \"$request_id\"\n| sort @timestamp asc",
+          "logGroupNames": [
+            "/seat-reservation/api"
+          ],
+          "statsGroups": []
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "table",
+      "title": "Outcomes by status and replica",
+      "description": "Over the selected time range.",
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 15,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "refId": "A",
+          "queryMode": "Logs",
+          "region": "default",
+          "id": "",
+          "expression": "filter fields.message = \"finished processing request\" and span.path != \"/readyz\"\n| stats count(*) as requests by fields.status as status, span.replica as replica\n| sort requests desc",
+          "logGroupNames": [
+            "/seat-reservation/api"
+          ],
+          "statsGroups": []
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "table",
+      "title": "Latency by replica (ms)",
+      "description": "Server-side time per request, over the selected range.",
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 15,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "refId": "A",
+          "queryMode": "Logs",
+          "region": "default",
+          "id": "",
+          "expression": "filter fields.message = \"finished processing request\" and span.path != \"/readyz\"\n| parse fields.latency \"* ms\" as ms\n| stats count(*) as requests, avg(ms) as avg_ms, pct(ms, 99) as p99_ms, max(ms) as max_ms by span.replica as replica",
+          "logGroupNames": [
+            "/seat-reservation/api"
+          ],
+          "statsGroups": []
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "table",
+      "title": "Warnings and errors",
+      "description": "Anything logged above INFO: 5xx responses, shed requests, cache or seat-map problems.",
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 23,
+        "w": 24,
+        "h": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "refId": "A",
+          "queryMode": "Logs",
+          "region": "default",
+          "id": "",
+          "expression": "fields @timestamp, level, fields.message as message, span.replica as replica, span.request_id as request_id\n| filter level != \"INFO\"\n| sort @timestamp desc\n| limit 100",
+          "logGroupNames": [
+            "/seat-reservation/api"
+          ],
+          "statsGroups": []
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "EC2 CPU (edge and replicas)",
+      "description": "Per instance, 1-minute maximum.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 30,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "refId": "A",
+          "queryMode": "Metrics",
+          "region": "default",
+          "namespace": "AWS/EC2",
+          "metricName": "CPUUtilization",
+          "dimensions": {
+            "InstanceId": "*"
+          },
+          "matchExact": false,
+          "statistic": "Maximum",
+          "period": "60",
+          "metricQueryType": 0,
+          "metricEditorMode": 0,
+          "id": "",
+          "expression": "",
+          "label": "${PROP('Dim.InstanceId')}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "RDS Postgres",
+      "description": "CPU and open connections.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 30,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "refId": "A",
+          "queryMode": "Metrics",
+          "region": "default",
+          "namespace": "AWS/RDS",
+          "metricName": "CPUUtilization",
+          "dimensions": {
+            "DBInstanceIdentifier": "seat-reservation-db"
+          },
+          "matchExact": false,
+          "statistic": "Average",
+          "period": "60",
+          "metricQueryType": 0,
+          "metricEditorMode": 0,
+          "id": "",
+          "expression": "",
+          "label": "CPU %"
+        },
+        {
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "refId": "B",
+          "queryMode": "Metrics",
+          "region": "default",
+          "namespace": "AWS/RDS",
+          "metricName": "DatabaseConnections",
+          "dimensions": {
+            "DBInstanceIdentifier": "seat-reservation-db"
+          },
+          "matchExact": false,
+          "statistic": "Average",
+          "period": "60",
+          "metricQueryType": 0,
+          "metricEditorMode": 0,
+          "id": "",
+          "expression": "",
+          "label": "connections"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    }
+  ],
+  "annotations": {
+    "list": []
+  }
+}

@@ -1,0 +1,5 @@
+[
+  { "targets": ["api-1:8080"], "labels": { "replica": "api-1" } },
+  { "targets": ["api-2:8080"], "labels": { "replica": "api-2" } },
+  { "targets": ["api-3:8080"], "labels": { "replica": "api-3" } }
+]

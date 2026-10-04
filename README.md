@@ -127,6 +127,17 @@ user id); any `user_id` in a body is ignored.
 
 ## Metrics and logs
 
+**Dashboards: https://13-126-244-127.sslip.io/grafana/** (no login; read-only)
+
+| Dashboard | What's on it |
+|---|---|
+| Seat Reservation — Metrics | from Prometheus, scraping every replica every 5 s: bookings and declines per second by reason, responses by status (5xx should never appear), requests per replica, memory vs database path, in-flight bookings, seats per show, seat-map drift, replicas up |
+| Seat Reservation — Logs & infrastructure | from CloudWatch: the latest requests (one line each, with `request_id`), a request-id search box (paste an `x-request-id`), outcomes and latency per replica, warnings and errors, and EC2 / RDS CPU |
+
+Locally the same Grafana is at http://localhost:8080/grafana/ (metrics only;
+CloudWatch exists only when deployed) and Prometheus at http://localhost:9090.
+The config is in `observability/`.
+
 `GET /metrics` is the whole service whichever replica answers: counters summed
 across replicas, per-replica gauges labelled `replica`, and `replica_up` showing
 whose numbers are included. `GET /metrics/local` is one replica's own.

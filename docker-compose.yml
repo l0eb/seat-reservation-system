@@ -73,6 +73,44 @@ services:
       api-3:
         condition: service_healthy
 
+  # Observability: Prometheus scrapes each replica every 5s; Grafana shows it
+  # at http://localhost:8080/grafana (read-only for everyone; admin login
+  # admin / $GRAFANA_ADMIN_PASSWORD). Prometheus itself: localhost:9090.
+  prometheus:
+    image: prom/prometheus:v3.15.0
+    container_name: seat-reservation-prometheus
+    restart: unless-stopped
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=7d"]
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/prometheus/targets.local.json:/etc/prometheus/targets.json:ro
+      - prometheus_data:/prometheus
+
+  grafana:
+    image: grafana/grafana:13.2.3
+    container_name: seat-reservation-grafana
+    restart: unless-stopped
+    environment: &grafana-env
+      GF_SERVER_ROOT_URL: http://localhost:8080/grafana/
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/metrics.json
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    volumes:
+      # Locally there's no CloudWatch: Prometheus and the metrics dashboard only.
+      - ./observability/grafana/provisioning/datasources/prometheus.yml:/etc/grafana/provisioning/datasources/prometheus.yml:ro
+      - ./observability/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./observability/grafana/dashboards/metrics.json:/etc/grafana/dashboards/metrics.json:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
   postgres:
     image: postgres:16
     container_name: seat-reservation-postgres
@@ -122,5 +160,7 @@ services:
         condition: service_healthy
 
 volumes:
+  prometheus_data:
+  grafana_data:
   postgres_data:
   pgadmin_data:
