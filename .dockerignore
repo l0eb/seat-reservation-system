@@ -1,0 +1,7 @@
+target
+.git
+.env
+*.xlsx
+pgadmin
+Dockerfile
+docker-compose.yml

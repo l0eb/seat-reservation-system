@@ -1,4 +1,28 @@
+# `docker compose up --build` runs the service the way it deploys: the
+# same image, configured only through the environment.
+# pgAdmin is opt-in: `docker compose --profile tools up`.
+
 services:
+  api:
+    build: .
+    image: seat-reservation-api
+    container_name: seat-reservation-api
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/seats
+      CACHE_URL: redis://dragonfly:6379
+      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
+      # Mints test tokens for the burst tool; never enable with a real secret.
+      AUTH_TOKEN_ROUTE_ENABLED: "true"
+      PORT: "8080"
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      dragonfly:
+        condition: service_started
+
   postgres:
     image: postgres:16
     container_name: seat-reservation-postgres
@@ -29,6 +53,7 @@ services:
       - "6379:6379"
 
   pgadmin:
+    profiles: ["tools"]
     image: dpage/pgadmin4:latest
     container_name: seat-reservation-pgadmin
     restart: unless-stopped
