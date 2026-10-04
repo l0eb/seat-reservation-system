@@ -139,6 +139,9 @@ pub async fn run(ctx: &mut Ctx, opts: &Options) -> Result<Totals> {
     let mut by_key: HashMap<&str, HashSet<&str>> = HashMap::new();
     let mut reservations: HashMap<&str, (usize, &[String])> = HashMap::new();
     let mut cancelled: HashSet<&str> = HashSet::new();
+    // Cancels with no answer: the reservation may or may not still hold
+    // its seats, so it can't count as live (or as gone) below.
+    let mut maybe_cancelled: HashSet<&str> = HashSet::new();
     let mut unsure: Vec<&[String]> = Vec::new(); // may or may not hold these seats
     for o in &outcomes {
         match (o.reply.status, o.reply.reservation_id()) {
@@ -154,7 +157,10 @@ pub async fn run(ctx: &mut Ctx, opts: &Options) -> Result<Totals> {
                 Some(200) => {
                     cancelled.insert(id);
                 }
-                _ if c.outcome_unknown() => unsure.push(&o.plan.seats),
+                _ if c.outcome_unknown() => {
+                    maybe_cancelled.insert(id);
+                    unsure.push(&o.plan.seats);
+                }
                 _ => {}
             }
         }
@@ -162,7 +168,7 @@ pub async fn run(ctx: &mut Ctx, opts: &Options) -> Result<Totals> {
     let mut holders: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     let mut per_user: HashMap<usize, usize> = HashMap::new();
     for (id, (user, seats)) in &reservations {
-        if cancelled.contains(id) {
+        if cancelled.contains(id) || maybe_cancelled.contains(id) {
             continue;
         }
         *per_user.entry(*user).or_default() += seats.len();

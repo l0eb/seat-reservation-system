@@ -226,6 +226,8 @@ fn reconcile(ctx: &mut Ctx, before: &Metrics, after: &Metrics, seen: Totals) {
                 }
             ),
         );
+        // A request with no answer may have been declined too, so the server
+        // can count up to that many more than the client saw.
         for (reason, client) in [
             ("seat_taken", seen.seat_taken),
             ("per_user_limit", seen.per_user_limit),
@@ -238,8 +240,15 @@ fn reconcile(ctx: &mut Ctx, before: &Metrics, after: &Metrics, seen: Totals) {
             r.check(
                 NAME,
                 format!("declined {{reason=\"{reason}\"}} matches"),
-                server == client,
-                format!("server {server}, client {client}"),
+                server >= client && server <= client + seen.unknown,
+                format!(
+                    "server {server}, client {client}{}",
+                    if seen.unknown > 0 && server != client {
+                        format!(" (+{} unknown)", seen.unknown)
+                    } else {
+                        String::new()
+                    }
+                ),
             );
         }
         let server_errors = (after.sum("http_requests_total{status=\"5")
