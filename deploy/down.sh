@@ -2,21 +2,22 @@
 # Delete everything up.sh created, then list anything still tagged
 # Project=seat-reservation. Safe to re-run.
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 1
 . deploy/config.sh
 
 log "deleting the $PROJECT deployment in $REGION ($ACCOUNT)"
 if [ "${1:-}" != --yes ]; then
-  read -r -p "This deletes the instance, the database and all its data. Type 'delete' to continue: " ok
+  read -r -p "This deletes the instances, the database and all its data. Type 'delete' to continue: " ok
   [ "$ok" = delete ] || exit 1
 fi
 
-# Every tagged instance, not just the first: never leave one running.
+# Every tagged instance, whatever its role or state: never leave one running.
 IDS=$(aws ec2 describe-instances --region "$REGION" --filters Name=tag:Project,Values=$PROJECT \
   Name=instance-state-name,Values=pending,running,stopping,stopped \
   --query 'Reservations[].Instances[].InstanceId' --output text)
 if [ -n "$IDS" ]; then
   log "terminating instance(s) $IDS"
+  # shellcheck disable=SC2086
   aws ec2 terminate-instances --region "$REGION" --instance-ids $IDS >/dev/null
 fi
 if aws rds describe-db-instances --region "$REGION" --db-instance-identifier "$DB_ID" >/dev/null 2>&1; then
@@ -24,6 +25,7 @@ if aws rds describe-db-instances --region "$REGION" --db-instance-identifier "$D
   aws rds delete-db-instance --region "$REGION" --db-instance-identifier "$DB_ID" \
     --skip-final-snapshot --delete-automated-backups >/dev/null
 fi
+# shellcheck disable=SC2086
 [ -n "$IDS" ] && aws ec2 wait instance-terminated --region "$REGION" --instance-ids $IDS
 
 ALLOC=$(eip_alloc)
@@ -51,9 +53,16 @@ if aws rds describe-db-instances --region "$REGION" --db-instance-identifier "$D
   log "waiting for RDS to finish deleting (~5 min)"
   aws rds wait db-instance-deleted --region "$REGION" --db-instance-identifier "$DB_ID"
 fi
-for sg in "$API_SG" "$DB_SG"; do
-  SG=$(sg_id "$sg")
-  [ "$SG" != None ] && { log "deleting security group $sg"; aws ec2 delete-security-group --region "$REGION" --group-id "$SG"; }
+# The groups reference each other (edge <-> api, api -> db), so empty them
+# of rules first; then each can be deleted.
+for sg in "$EDGE_SG" "$API_SG" "$DB_SG"; do
+  id=$(sg_id "$sg"); [ "$id" = None ] && continue
+  rules=$(aws ec2 describe-security-groups --region "$REGION" --group-ids "$id" --query 'SecurityGroups[0].IpPermissions' --output json)
+  [ "$rules" != "[]" ] && aws ec2 revoke-security-group-ingress --region "$REGION" --group-id "$id" --ip-permissions "$rules" >/dev/null
+done
+for sg in "$EDGE_SG" "$API_SG" "$DB_SG"; do
+  id=$(sg_id "$sg")
+  [ "$id" != None ] && { log "deleting security group $sg"; aws ec2 delete-security-group --region "$REGION" --group-id "$id"; }
 done
 
 log "anything still tagged Project=$PROJECT:"

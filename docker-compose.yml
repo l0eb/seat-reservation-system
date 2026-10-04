@@ -55,6 +55,9 @@ services:
     restart: unless-stopped
     ports:
       - "8080:8080"
+    environment:
+      SITE: ":8080"
+      UPSTREAMS: api-1:8080 api-2:8080 api-3:8080
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
     healthcheck:
