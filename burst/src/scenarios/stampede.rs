@@ -146,7 +146,7 @@ pub async fn run(ctx: &mut Ctx, opts: &Options) -> Result<Totals> {
                 by_key.entry(&o.plan.key).or_default().insert(id);
                 reservations.insert(id, (o.plan.user, &o.plan.seats));
             }
-            (None, _) => unsure.push(&o.plan.seats),
+            _ if o.reply.outcome_unknown() => unsure.push(&o.plan.seats),
             _ => {}
         }
         if let (Some(c), Some(id)) = (&o.cancel, o.reply.reservation_id()) {
@@ -154,7 +154,7 @@ pub async fn run(ctx: &mut Ctx, opts: &Options) -> Result<Totals> {
                 Some(200) => {
                     cancelled.insert(id);
                 }
-                None => unsure.push(&o.plan.seats),
+                _ if c.outcome_unknown() => unsure.push(&o.plan.seats),
                 _ => {}
             }
         }
@@ -227,7 +227,7 @@ pub async fn run(ctx: &mut Ctx, opts: &Options) -> Result<Totals> {
             if unsure_seats.is_empty() {
                 String::new()
             } else {
-                format!(" ({} seats unknowable: no response)", unsure_seats.len())
+                format!(" ({} seats unknowable: no answer)", unsure_seats.len())
             }
         ),
     );

@@ -65,7 +65,8 @@ pub struct Totals {
     pub seat_taken: u64,
     pub per_user_limit: u64,
     pub idempotency_mismatch: u64,
-    /// Reserve requests with no response: each may or may not have booked.
+    /// Reserve requests with no answer from the service (no response, or a
+    /// load balancer 502/504): each may or may not have booked.
     pub unknown: u64,
 }
 
@@ -86,7 +87,7 @@ impl Totals {
         self.seat_taken = tally.count("409 seat_taken");
         self.per_user_limit = tally.count("409 per_user_limit");
         self.idempotency_mismatch = tally.count("409 idempotency_mismatch");
-        self.unknown = tally.count("no response");
+        self.unknown = tally.count("no response") + tally.count("502") + tally.count("504");
         self
     }
 }
@@ -95,6 +96,7 @@ pub struct Check {
     scenario: &'static str,
     name: String,
     pass: bool,
+    skipped: bool,
     detail: String,
 }
 
@@ -115,7 +117,24 @@ impl Report {
             scenario,
             name: name.into(),
             pass,
+            skipped: false,
             detail: detail.into(),
+        });
+    }
+
+    /// A check that can't be judged this run, and why. Doesn't fail.
+    pub fn skip(
+        &mut self,
+        scenario: &'static str,
+        name: impl Into<String>,
+        why: impl Into<String>,
+    ) {
+        self.checks.push(Check {
+            scenario,
+            name: name.into(),
+            pass: true,
+            skipped: true,
+            detail: why.into(),
         });
     }
 
@@ -126,17 +145,28 @@ impl Report {
     pub fn print(&self) {
         println!("\nCHECKS");
         for check in &self.checks {
-            let mark = if check.pass { "PASS" } else { "FAIL" };
+            let mark = match (check.skipped, check.pass) {
+                (true, _) => "SKIP",
+                (false, true) => "PASS",
+                (false, false) => "FAIL",
+            };
             println!(
                 "  [{mark}] {:<15} {:<52} {}",
                 check.scenario, check.name, check.detail
             );
         }
         let failed = self.failed();
+        let skipped = self.checks.iter().filter(|c| c.skipped).count();
+        let judged = self.checks.len() - skipped;
         println!(
-            "\n{} of {} checks passed{}",
-            self.checks.len() - failed,
-            self.checks.len(),
+            "\n{} of {} checks passed{}{}",
+            judged - failed,
+            judged,
+            if skipped == 0 {
+                String::new()
+            } else {
+                format!(" ({skipped} skipped)")
+            },
             if failed == 0 { "" } else { " — FAILED" }
         );
     }

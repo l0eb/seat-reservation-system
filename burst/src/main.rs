@@ -158,10 +158,30 @@ async fn run(args: Args) -> Result<usize> {
         totals += stampede::run(&mut ctx, &opts).await?;
     }
 
-    let after = ctx.api.metrics().await?;
+    let after = settle(&ctx).await?;
     reconcile(&mut ctx, &before, &after, totals);
     ctx.report.print();
     Ok(ctx.report.failed())
+}
+
+/// /metrics once every replica's seat map agrees with the database for the
+/// shows this run made, or after 20s. Maps learn of changes asynchronously,
+/// and one that missed a notice is healed by the replica's own periodic
+/// audit (15s), so give them that long before judging.
+async fn settle(ctx: &Ctx) -> Result<Metrics> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let metrics = ctx.api.metrics().await?;
+        let agree = ctx.shows.iter().all(|(_, show)| {
+            let confirmed = metrics.show("seats_confirmed", show);
+            let maps = metrics.show_per_replica("seat_map_taken", show);
+            !maps.is_empty() && maps.iter().all(|(_, taken)| Some(*taken) == confirmed)
+        });
+        if agree || std::time::Instant::now() >= deadline {
+            return Ok(metrics);
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
 }
 
 /// The service's own counters must tell the same story as the client.
@@ -170,69 +190,113 @@ fn reconcile(ctx: &mut Ctx, before: &Metrics, after: &Metrics, seen: Totals) {
     println!("\n== reconciliation with /metrics (assumes no other traffic during the run)");
     let delta = |series: &str| (after.get(series) - before.get(series)) as u64;
     let r = &mut ctx.report;
-    let confirmed = delta("reservations_confirmed_total");
-    // A request with no response may have booked: allow up to that many more.
-    r.check(
-        NAME,
-        "reservations_confirmed_total matches new reservations",
-        confirmed >= seen.created && confirmed <= seen.created + seen.unknown,
-        format!(
-            "server {confirmed}, client {}{}",
-            seen.created,
-            if seen.unknown > 0 {
-                format!(" (+{} unknown)", seen.unknown)
-            } else {
-                String::new()
-            }
-        ),
-    );
-    for (reason, client) in [
-        ("seat_taken", seen.seat_taken),
-        ("per_user_limit", seen.per_user_limit),
-        ("idempotency_mismatch", seen.idempotency_mismatch),
-        ("idempotent_replay", seen.replayed),
-    ] {
-        let server = delta(&format!(
-            "reservations_declined_total{{reason=\"{reason}\"}}"
-        ));
+    // Counters reset when a replica restarts, so before/after differences
+    // only mean something if every replica ran the whole time.
+    let (started_before, started_after) = (before.start_times(), after.start_times());
+    let restarted: Vec<&String> = started_before
+        .iter()
+        .filter(|(replica, t)| started_after.get(*replica) != Some(t))
+        .map(|(replica, _)| replica)
+        .collect();
+    if !restarted.is_empty() {
+        let who = restarted
+            .iter()
+            .map(|r| r.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        r.skip(
+            NAME,
+            "counters match what the client saw",
+            format!("{who} restarted during the run, so its counters reset"),
+        );
+    } else {
+        let confirmed = delta("reservations_confirmed_total");
+        // A request with no response may have booked: allow up to that many more.
         r.check(
             NAME,
-            format!("declined {{reason=\"{reason}\"}} matches"),
-            server == client,
-            format!("server {server}, client {client}"),
+            "reservations_confirmed_total matches new reservations",
+            confirmed >= seen.created && confirmed <= seen.created + seen.unknown,
+            format!(
+                "server {confirmed}, client {}{}",
+                seen.created,
+                if seen.unknown > 0 {
+                    format!(" (+{} unknown)", seen.unknown)
+                } else {
+                    String::new()
+                }
+            ),
         );
+        for (reason, client) in [
+            ("seat_taken", seen.seat_taken),
+            ("per_user_limit", seen.per_user_limit),
+            ("idempotency_mismatch", seen.idempotency_mismatch),
+            ("idempotent_replay", seen.replayed),
+        ] {
+            let server = delta(&format!(
+                "reservations_declined_total{{reason=\"{reason}\"}}"
+            ));
+            r.check(
+                NAME,
+                format!("declined {{reason=\"{reason}\"}} matches"),
+                server == client,
+                format!("server {server}, client {client}"),
+            );
+        }
+        let server_errors = (after.sum("http_requests_total{status=\"5")
+            - before.sum("http_requests_total{status=\"5")) as u64;
+        r.check(
+            NAME,
+            "no 5xx counted by the service",
+            server_errors == 0,
+            format!("{server_errors}"),
+        );
+        let shed = delta("reserve_shed_total");
+        r.check(
+            NAME,
+            "no requests shed for overload",
+            shed == 0,
+            format!("{shed}"),
+        );
+        let memory = delta("reserve_requests_total{path=\"memory\"}");
+        let database = delta("reserve_requests_total{path=\"database\"}");
+        println!("  reserve requests answered from memory: {memory}, by the database: {database}");
     }
-    let server_errors = (after.sum("http_requests_total{status=\"5")
-        - before.sum("http_requests_total{status=\"5")) as u64;
-    r.check(
-        NAME,
-        "no 5xx counted by the service",
-        server_errors == 0,
-        format!("{server_errors}"),
-    );
-    let shed = delta("reserve_shed_total");
-    r.check(
-        NAME,
-        "no requests shed for overload",
-        shed == 0,
-        format!("{shed}"),
-    );
-    let memory = delta("reserve_requests_total{path=\"memory\"}");
-    let database = delta("reserve_requests_total{path=\"database\"}");
-    println!("  reserve requests answered from memory: {memory}, by the database: {database}");
 
+    // Behind a load balancer the totals are only whole if every replica
+    // answered when /metrics was read.
+    let down: Vec<String> = before
+        .replicas_down()
+        .into_iter()
+        .chain(after.replicas_down())
+        .collect();
+    r.check(
+        NAME,
+        "every replica's counters are in the totals",
+        down.is_empty(),
+        if down.is_empty() {
+            String::new()
+        } else {
+            format!("missing: {}", down.join(", "))
+        },
+    );
+
+    // Every replica's own seat map must agree with the database.
     for (scenario, show) in &ctx.shows {
         let confirmed = after.show("seats_confirmed", show);
-        let map = after.show("seat_map_taken", show);
+        let maps = after.show_per_replica("seat_map_taken", show);
+        let agree = confirmed.is_some()
+            && !maps.is_empty()
+            && maps.iter().all(|(_, taken)| Some(*taken) == confirmed);
+        let detail = maps
+            .iter()
+            .map(|(replica, taken)| format!("{replica} {taken}"))
+            .collect::<Vec<_>>()
+            .join(", ");
         r.check(
             NAME,
             format!("seat map agrees with database ({scenario})"),
-            confirmed.is_some() && confirmed == map,
-            format!(
-                "map {}, db {}",
-                map.unwrap_or(-1.0),
-                confirmed.unwrap_or(-1.0)
-            ),
+            agree,
+            format!("db {}; maps: {detail}", confirmed.unwrap_or(-1.0)),
         );
     }
 }

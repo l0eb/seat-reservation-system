@@ -43,6 +43,13 @@ impl Reply {
         self.is(409) && self.body["error"] == reason
     }
 
+    /// No answer from the service itself: no response at all, or the load
+    /// balancer's 502/504 because the replica died or timed out mid-request.
+    /// The request may or may not have been applied.
+    pub fn outcome_unknown(&self) -> bool {
+        matches!(self.status, None | Some(502) | Some(504))
+    }
+
     /// The reservation in a reserve or cancel response.
     pub fn reservation_id(&self) -> Option<&str> {
         self.body["reservation_id"].as_str()

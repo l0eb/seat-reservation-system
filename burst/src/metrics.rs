@@ -35,4 +35,44 @@ impl Metrics {
     pub fn show(&self, name: &str, show: &str) -> Option<f64> {
         self.0.get(&format!("{name}{{show=\"{show}\"}}")).copied()
     }
+
+    /// A per-replica gauge for one show, e.g. `seat_map_taken`: each
+    /// replica's value, sorted by replica.
+    pub fn show_per_replica(&self, name: &str, show: &str) -> Vec<(String, f64)> {
+        let prefix = format!("{name}{{show=\"{show}\",replica=\"");
+        let mut values: Vec<(String, f64)> = self
+            .0
+            .iter()
+            .filter_map(|(series, v)| {
+                let replica = series.strip_prefix(&prefix)?.strip_suffix("\"}")?;
+                Some((replica.to_string(), *v))
+            })
+            .collect();
+        values.sort_by(|a, b| a.0.cmp(&b.0));
+        values
+    }
+
+    /// Each replica's start time (Unix seconds), from
+    /// `process_start_time_seconds{replica=..}`.
+    pub fn start_times(&self) -> std::collections::BTreeMap<String, f64> {
+        self.0
+            .iter()
+            .filter_map(|(series, v)| {
+                let replica = series.strip_prefix("process_start_time_seconds{replica=\"")?;
+                Some((replica.strip_suffix("\"}")?.to_string(), *v))
+            })
+            .collect()
+    }
+
+    /// Replicas whose counters are missing from the totals.
+    pub fn replicas_down(&self) -> Vec<String> {
+        self.0
+            .iter()
+            .filter(|(_, v)| **v == 0.0)
+            .filter_map(|(series, _)| {
+                let replica = series.strip_prefix("replica_up{replica=\"")?;
+                Some(replica.strip_suffix("\"}")?.to_string())
+            })
+            .collect()
+    }
 }
