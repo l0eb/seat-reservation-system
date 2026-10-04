@@ -84,7 +84,19 @@ async fn reserve_seats(
     if input.seats.len() > show.per_user_limit as usize {
         return Err(AppError::Conflict(Conflict::PerUserLimit));
     }
-    precheck_seats(state, show_id, &input.seats).await?;
+    if let Err(err) = precheck_seats(state, show_id, &input.seats).await {
+        // A concurrent request with this key can commit between the lookup
+        // above and the pre-check, so the seats may be taken by this very
+        // request. Look again before declining.
+        if matches!(err, AppError::Conflict(Conflict::SeatTaken)) {
+            if let Some(existing) =
+                find_by_key(&state.pool, &user.user_id, &input.idempotency_key).await?
+            {
+                return replay(existing, &input.request_hash);
+            }
+        }
+        return Err(err);
+    }
     claim_seats(state, &show, user, input).await
 }
 
